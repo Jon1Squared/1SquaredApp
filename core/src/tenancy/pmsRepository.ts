@@ -3350,6 +3350,99 @@ export class TenantPmsRepository extends TenantScopedRepository {
     });
   }
 
+  public async getMatterPmsCodeInTx(
+    tx: TenantSqlClient,
+    ctx: TenantContext,
+    matterId: string,
+  ): Promise<string | null> {
+    const cleanId = matterId.trim();
+    if (!cleanId) return null;
+    const res = await tx.query<DbPmsLinkRow>(
+      `SELECT *
+         FROM public.pms_links
+        WHERE tenant_id = $1
+          AND entity_type = 'matter'
+          AND onesquared_id = $2
+        LIMIT 1`,
+      [ctx.tenantId, cleanId],
+    );
+    const row = res.rows[0];
+    if (!row) return null;
+    this.assertRowTenant(ctx, row.tenant_id, 'pms_links');
+    return row.pms_code;
+  }
+
+  public async getClientLedgerEntryByTransactionIdInTx(
+    tx: TenantSqlClient,
+    ctx: TenantContext,
+    transactionId: string,
+    options?: { readonly forShare?: boolean },
+  ): Promise<TenantPmsClientAccountEntry | null> {
+    const cleanTxId = transactionId.trim();
+    if (!cleanTxId) return null;
+    const lockSql = options?.forShare ? ' FOR SHARE' : '';
+    const res = await tx.query<DbGenericPayloadRow>(
+      `SELECT *
+         FROM public.pms_client_account_entries
+        WHERE tenant_id = $1
+          AND transaction_id = $2
+        LIMIT 1${lockSql}`,
+      [ctx.tenantId, cleanTxId],
+    );
+    if (res.rows.length === 0) return null;
+    return this.mapClientAccountRows(ctx, res.rows)[0] ?? null;
+  }
+
+  public async listPositiveClientLedgerReceiptsForMatterCodeInTx(
+    tx: TenantSqlClient,
+    ctx: TenantContext,
+    matterCode: string,
+  ): Promise<TenantPmsClientAccountEntry[]> {
+    const cleanCode = matterCode.trim();
+    if (!cleanCode) return [];
+    const res = await tx.query<DbGenericPayloadRow>(
+      `SELECT *
+         FROM public.pms_client_account_entries
+        WHERE tenant_id = $1
+          AND matter_code = $2
+          AND direction = 'Receipt'
+          AND amount_pence > 0
+        ORDER BY entry_date DESC, transaction_id ASC`,
+      [ctx.tenantId, cleanCode],
+    );
+    return this.mapClientAccountRows(ctx, res.rows);
+  }
+
+  public async listUnmatchedPositiveClientLedgerReceiptsForMatter(
+    ctx: TenantContext,
+    matterId: string,
+  ): Promise<TenantPmsClientAccountEntry[]> {
+    const cleanMatterId = matterId.trim();
+    if (!cleanMatterId) return [];
+    return this.withTenantReadTransaction(ctx, async (tx) => {
+      const pmsCode = await this.getMatterPmsCodeInTx(tx, ctx, cleanMatterId);
+      if (!pmsCode) return [];
+      const res = await tx.query<DbGenericPayloadRow>(
+        `SELECT ca.*
+           FROM public.pms_client_account_entries ca
+          WHERE ca.tenant_id = $1
+            AND ca.matter_code = $2
+            AND ca.direction = 'Receipt'
+            AND ca.amount_pence > 0
+            AND NOT EXISTS (
+              SELECT 1
+                FROM public.money_on_account_receipts r
+               WHERE r.tenant_id = ca.tenant_id
+                 AND r.pms_transaction_id = ca.transaction_id
+                 AND r.reversed_at IS NULL
+            )
+          ORDER BY ca.entry_date DESC, ca.transaction_id ASC`,
+        [ctx.tenantId, pmsCode],
+      );
+      return this.mapClientAccountRows(ctx, res.rows);
+    });
+  }
+
   public async getClientAccountLedger(
     ctx: TenantContext,
     matterCode: string,

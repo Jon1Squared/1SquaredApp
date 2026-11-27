@@ -4267,6 +4267,112 @@ ALTER TABLE public.quotes
 `.trim(),
 };
 
+export const MONEY_ON_ACCOUNT_MIGRATION_0030: TenantMigrationDefinition = {
+  version: '0030',
+  name: '0030_money_on_account_expand',
+  description:
+    'Expand-phase migration adding public.money_on_account_requests, public.money_on_account_receipts (with uq_moa_receipts_tenant_pms_tx), and sequences (ADR 0043, S1-08).',
+  dependsOn: ['0009', '0010', '0013', '0023', '0027', '0028', '0029'],
+  tablesChanged: [
+    'money_on_account_requests',
+    'money_on_account_receipts',
+  ],
+  upSql: `
+CREATE SEQUENCE IF NOT EXISTS public.tenant_moa_request_id_seq START WITH 1 INCREMENT BY 1;
+CREATE SEQUENCE IF NOT EXISTS public.tenant_moa_receipt_id_seq START WITH 1 INCREMENT BY 1;
+
+CREATE TABLE IF NOT EXISTS public.money_on_account_requests (
+  tenant_id TEXT NOT NULL,
+  id TEXT NOT NULL,
+  matter_id TEXT NOT NULL,
+  quote_id TEXT NULL,
+  payment_reference TEXT NOT NULL,
+  requested_amount_pence BIGINT NOT NULL CHECK (requested_amount_pence > 0),
+  currency TEXT NOT NULL DEFAULT 'GBP' CHECK (currency = 'GBP'),
+  recipient_email TEXT NOT NULL,
+  recipient_name TEXT NOT NULL,
+  status TEXT NOT NULL CHECK (status IN ('draft', 'requested', 'part_received', 'received', 'cancelled')),
+  requested_at TIMESTAMPTZ NULL,
+  requested_by_person_id TEXT NULL,
+  outbox_email_id TEXT NULL,
+  bank_details_snapshot_json JSONB NOT NULL DEFAULT '{}'::jsonb,
+  intake_check_record_id TEXT NULL,
+  notes TEXT NULL,
+  cancelled_at TIMESTAMPTZ NULL,
+  cancelled_by_person_id TEXT NULL,
+  cancellation_reason TEXT NULL,
+  idempotency_key TEXT NULL,
+  row_version INTEGER NOT NULL DEFAULT 1,
+  created_by_person_id TEXT NOT NULL,
+  created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+  updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+  PRIMARY KEY (tenant_id, id),
+  FOREIGN KEY (tenant_id, matter_id)
+    REFERENCES public.matters (tenant_id, id)
+    ON DELETE CASCADE,
+  CONSTRAINT uq_moa_requests_payment_ref UNIQUE (tenant_id, payment_reference)
+);
+
+CREATE UNIQUE INDEX IF NOT EXISTS uq_moa_requests_idempotency_key
+  ON public.money_on_account_requests (tenant_id, matter_id, idempotency_key)
+  WHERE idempotency_key IS NOT NULL;
+
+CREATE INDEX IF NOT EXISTS idx_moa_requests_tenant_matter
+  ON public.money_on_account_requests (tenant_id, matter_id, status, updated_at DESC);
+
+CREATE TABLE IF NOT EXISTS public.money_on_account_receipts (
+  tenant_id TEXT NOT NULL,
+  id TEXT NOT NULL,
+  request_id TEXT NOT NULL,
+  matter_id TEXT NOT NULL,
+  source TEXT NOT NULL CHECK (source IN ('manual', 'pms_ledger')),
+  amount_pence BIGINT NOT NULL CHECK (amount_pence > 0),
+  received_date TEXT NOT NULL,
+  bank_reference TEXT NULL,
+  notes TEXT NULL,
+  pms_transaction_id TEXT NULL,
+  pms_matter_code TEXT NULL,
+  intake_check_record_id TEXT NULL,
+  evidence_artifact_id TEXT NULL,
+  recorded_by_person_id TEXT NOT NULL,
+  recorded_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+  reversed_at TIMESTAMPTZ NULL,
+  reversed_by_person_id TEXT NULL,
+  reversal_reason TEXT NULL,
+  PRIMARY KEY (tenant_id, id),
+  FOREIGN KEY (tenant_id, request_id)
+    REFERENCES public.money_on_account_requests (tenant_id, id)
+    ON DELETE RESTRICT,
+  FOREIGN KEY (tenant_id, matter_id)
+    REFERENCES public.matters (tenant_id, id)
+    ON DELETE CASCADE
+);
+
+CREATE INDEX IF NOT EXISTS idx_moa_receipts_request
+  ON public.money_on_account_receipts (tenant_id, request_id, recorded_at DESC);
+
+CREATE INDEX IF NOT EXISTS idx_moa_receipts_matter
+  ON public.money_on_account_receipts (tenant_id, matter_id, recorded_at DESC);
+
+CREATE UNIQUE INDEX IF NOT EXISTS uq_moa_receipts_tenant_pms_tx
+  ON public.money_on_account_receipts (tenant_id, pms_transaction_id)
+  WHERE pms_transaction_id IS NOT NULL AND reversed_at IS NULL;
+`.trim(),
+  downSql: `
+DROP INDEX IF EXISTS uq_moa_receipts_tenant_pms_tx;
+DROP INDEX IF EXISTS idx_moa_receipts_matter;
+DROP INDEX IF EXISTS idx_moa_receipts_request;
+DROP TABLE IF EXISTS public.money_on_account_receipts;
+
+DROP INDEX IF EXISTS idx_moa_requests_tenant_matter;
+DROP INDEX IF EXISTS uq_moa_requests_idempotency_key;
+DROP TABLE IF EXISTS public.money_on_account_requests;
+
+DROP SEQUENCE IF EXISTS public.tenant_moa_receipt_id_seq;
+DROP SEQUENCE IF EXISTS public.tenant_moa_request_id_seq;
+`.trim(),
+};
+
 export const CORE_TENANT_MIGRATIONS: readonly TenantMigrationDefinition[] = [
   DOCUMENT_GENERATION_MIGRATION_0001,
   DOCUMENT_STORE_INTEGRATION_MIGRATION_0002,
@@ -4297,6 +4403,7 @@ export const CORE_TENANT_MIGRATIONS: readonly TenantMigrationDefinition[] = [
   PMS_MONEY_AND_RETAINER_PENCE_MIGRATION_0027,
   ENGAGEMENT_AND_CHASING_MIGRATION_0028,
   QUOTES_POA_AND_DISPATCH_MIGRATION_0029,
+  MONEY_ON_ACCOUNT_MIGRATION_0030,
 ];
 
 export function validateMigrationCatalogueOrder(

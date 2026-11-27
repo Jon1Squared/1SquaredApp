@@ -3940,6 +3940,14 @@ export class TenantMatterRepository extends TenantScopedRepository {
   ): Promise<void> {
     await this.withTenantTransaction(ctx, async (tx) => {
       await tx.query(
+        'DELETE FROM public.money_on_account_receipts WHERE tenant_id = $1',
+        [ctx.tenantId],
+      );
+      await tx.query(
+        'DELETE FROM public.money_on_account_requests WHERE tenant_id = $1',
+        [ctx.tenantId],
+      );
+      await tx.query(
         'DELETE FROM public.matter_opening_gate_overrides WHERE tenant_id = $1',
         [ctx.tenantId],
       );

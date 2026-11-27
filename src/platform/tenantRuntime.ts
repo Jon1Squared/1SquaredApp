@@ -29,6 +29,7 @@ import {
   TenantIntakeQuoteRepository,
   TenantJobRunRepository,
   TenantMatterRepository,
+  TenantMoneyOnAccountRepository,
   TenantOutboxRepository,
   TenantPartyRepository,
   TenantPmsRepository,
@@ -981,6 +982,7 @@ const intakeCheckRepositoryInstance = new TenantIntakeCheckRepository();
 const evidenceArtifactRepositoryInstance = new TenantEvidenceArtifactRepository();
 const chasingRepositoryInstance = new TenantChasingRepository();
 const engagementRepositoryInstance = new TenantEngagementRepository();
+const moneyOnAccountRepositoryInstance = new TenantMoneyOnAccountRepository();
 const searchRepositoryInstance = new TenantSearchRepository();
 const jobRunRepositoryInstance = new TenantJobRunRepository();
 const outboxRepositoryInstance = new TenantOutboxRepository();
@@ -1038,6 +1040,10 @@ export function getChasingRepository(): TenantChasingRepository {
 
 export function getEngagementRepository(): TenantEngagementRepository {
   return engagementRepositoryInstance;
+}
+
+export function getMoneyOnAccountRepository(): TenantMoneyOnAccountRepository {
+  return moneyOnAccountRepositoryInstance;
 }
 
 export function getSearchRepository(): TenantSearchRepository {
@@ -1318,6 +1324,7 @@ export {
   TenantIntakeQuoteRepository,
   TenantJobRunRepository,
   TenantMatterRepository,
+  TenantMoneyOnAccountRepository,
   TenantOutboxRepository,
   TenantPartyRepository,
   TenantPmsRepository,

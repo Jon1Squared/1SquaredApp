@@ -23,6 +23,7 @@ import {
   TenantIntakeQuoteRepository,
   TenantKeyDateRepository,
   TenantMatterRepository,
+  TenantMoneyOnAccountRepository,
   TenantOutboxRepository,
   TenantPartyRepository,
   TenantPmsRepository,
@@ -269,6 +270,7 @@ export async function clearMigratedPostgresModulesForTenant(options: {
     });
   }
   if (modules.includes('matters')) {
+    await new TenantMoneyOnAccountRepository().clearTenantData(ctx);
     const matterRepo = new TenantMatterRepository();
     await matterRepo.clearTenantData(ctx, {
       ...(options.resetMatterNumberSequences !== undefined
@@ -449,6 +451,7 @@ export async function importFirmStoreModulesToPostgres(
   }
 
   if (modules.includes('matters')) {
+    await new TenantMoneyOnAccountRepository().clearTenantData(ctx);
     const matterRepo = new TenantMatterRepository();
     const people = store.people ?? [];
     const teams = store.teams ?? [];

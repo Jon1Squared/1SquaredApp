@@ -2973,4 +2973,124 @@ describe('S0-18: PostgreSQL Per-Tenant PMS Data & PMS Links Repository, ADR 0029
       setActiveTenantConfigForTesting(savedRawCfg);
     }
   });
+
+  it('S1-08: *InTx PMS client ledger helpers strictly filter positive Receipts and respect tenant isolation', async () => {
+    const pmsRepo = getPmsRepository();
+    const moaRepo = new (await import('@platform/core')).TenantMoneyOnAccountRepository();
+    const matterRepo = getMatterRepository();
+    const baseStore = loadCommittedSeedStore();
+
+    const ctxAlpha = makeTenantContext('tenant-a');
+    const ctxBravo = makeTenantContext('tenant-b');
+    await importFirmStoreModulesToPostgres({
+      ctx: ctxAlpha,
+      store: baseStore,
+      tenantConfig: { ...getActiveTenantConfiguration(), tenantId: ctxAlpha.tenantId },
+      modules: ['parties', 'matters', 'intake', 'quotes', 'tasks', 'hr', 'catalogues'],
+      clearFirst: true,
+    });
+    await importFirmStoreModulesToPostgres({
+      ctx: ctxBravo,
+      store: baseStore,
+      tenantConfig: { ...getActiveTenantConfiguration(), tenantId: ctxBravo.tenantId },
+      modules: ['parties', 'matters', 'intake', 'quotes', 'tasks', 'hr', 'catalogues'],
+      clearFirst: true,
+    });
+    await pmsRepo.clearTenantData(ctxAlpha);
+    await pmsRepo.clearTenantData(ctxBravo);
+    await moaRepo.clearTenantData(ctxAlpha);
+    await moaRepo.clearTenantData(ctxBravo);
+
+    const alphaSeedMatter = (
+      await matterRepo.listAllMattersUnfiltered<import('@/domain/types').Matter>(ctxAlpha)
+    )[0]!;
+    const matter = await matterRepo.createMatter(ctxAlpha, {
+      ...alphaSeedMatter,
+      id: 'M-PMS-S108-01',
+      matterNumber: 'MATS108-01',
+    });
+
+    const baseDataset = buildSyntheticDataset({
+      suffix: 'A',
+      asAtDate: '2026-11-27',
+      wipAmount: 1000,
+      invoiceNet: 500,
+      unlinkedWipAmount: 100,
+    });
+    await pmsRepo.importExtractDataset(ctxAlpha, {
+      ...baseDataset,
+      clientAccount: [
+        {
+          transaction_id: 'CA-POS-01',
+          matter_code: 'MAT-A001',
+          client_code: 'CL-A001',
+          date: '2026-11-26',
+          type: 'Receipt',
+          description: 'POA transfer received',
+          amount: 500,
+          amount_pence: 50000 as import('@platform/core').MinorUnits,
+        },
+        {
+          transaction_id: 'CA-PAY-02',
+          matter_code: 'MAT-A001',
+          client_code: 'CL-A001',
+          date: '2026-11-26',
+          type: 'Payment',
+          description: 'Search fee payment',
+          amount: -250,
+          amount_pence: -25000 as import('@platform/core').MinorUnits,
+        },
+        {
+          transaction_id: 'CA-XFER-03',
+          matter_code: 'MAT-A001',
+          client_code: 'CL-A001',
+          date: '2026-11-26',
+          type: 'Transfer to office',
+          description: 'Transfer to office',
+          amount: -100,
+          amount_pence: -10000 as import('@platform/core').MinorUnits,
+        },
+      ],
+    });
+
+    await pmsRepo.putPmsLink(ctxAlpha, {
+      id: 'PMSL-S108-1',
+      entityType: 'matter',
+      onesquaredId: matter.id,
+      pmsCode: 'MAT-A001',
+      matchedBy: 'manual',
+      matchedAt: '2026-11-27T09:00:00.000Z',
+    });
+
+    await pmsRepo.withTenantTransaction(ctxAlpha, async (tx) => {
+      expect(await pmsRepo.getMatterPmsCodeInTx(tx, ctxAlpha, matter.id)).toBe(
+        'MAT-A001',
+      );
+      const posOnly = await pmsRepo.listPositiveClientLedgerReceiptsForMatterCodeInTx(
+        tx,
+        ctxAlpha,
+        'MAT-A001',
+      );
+      expect(posOnly.map((e) => e.transaction_id)).toEqual(['CA-POS-01']);
+      const single = await pmsRepo.getClientLedgerEntryByTransactionIdInTx(
+        tx,
+        ctxAlpha,
+        'CA-POS-01',
+        { forShare: true },
+      );
+      expect(single?.amount_pence).toBe(50000);
+    });
+
+    const unmatched = await pmsRepo.listUnmatchedPositiveClientLedgerReceiptsForMatter(
+      ctxAlpha,
+      matter.id,
+    );
+    expect(unmatched.map((e) => e.transaction_id)).toEqual(['CA-POS-01']);
+    expect(
+      await pmsRepo.listUnmatchedPositiveClientLedgerReceiptsForMatter(
+        ctxBravo,
+        matter.id,
+      ),
+    ).toEqual([]);
+  });
 });
