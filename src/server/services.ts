@@ -39531,10 +39531,26 @@ const ENGAGEMENT_LETTER_CHASE_ADAPTER: CommunicationChaseAdapter<Matter> = {
     teams,
     rbacConfig,
   }) {
+    const owningTeam =
+      (matter.owningTeamId
+        ? teams.find(
+            (t) =>
+              t.active &&
+              (t.id === matter.owningTeamId ||
+                t.orgTeamId === matter.owningTeamId),
+          )
+        : undefined) ??
+      (matter.practiceAreaId
+        ? teams.find(
+            (t) =>
+              t.active && t.practiceAreaIds.includes(matter.practiceAreaId),
+          )
+        : undefined);
     const orderedPersonIds = [
       matter.leadFeeEarnerId,
       matter.responsiblePartnerId,
       matter.supervisingPartnerId,
+      ...(owningTeam?.leadIds ?? []),
     ].filter((id): id is string => Boolean(id?.trim()));
     return {
       orderedPersonIds,
@@ -39546,6 +39562,8 @@ const ENGAGEMENT_LETTER_CHASE_ADAPTER: CommunicationChaseAdapter<Matter> = {
         }),
       taskTitle: `Follow up unsigned engagement letter: ${matter.matterNumber || matter.id}`,
       taskDescription: `No signed engagement letter has been recorded after ${rule.escalateTaskDays} days. Please contact the client to confirm instructions.`,
+      failureTaskTitle: `Follow up failed engagement chase: ${matter.matterNumber || matter.id}`,
+      failureTaskDescription: `Automated engagement chasing failed 3 times consecutively for ${matter.matterNumber || matter.id}. Please review and follow up directly with the client.`,
       linkedRecords: [{ recordType: 'matter', recordId: matter.id }],
       matterId: matter.id,
       notificationDetail: 'Engagement letter chase escalated',
@@ -39565,6 +39583,123 @@ export const COMMUNICATION_CHASE_ADAPTERS: ReadonlyMap<
   ],
 ]);
 
+function buildZeroPiiChaseStepAuditEntry(params: {
+  readonly tenantId: string;
+  readonly chaseId: string;
+  readonly stepIndex: number;
+  readonly action: string;
+  readonly field: string;
+  readonly outcome: string;
+  readonly actorId: string;
+  readonly at: string;
+}): FirmAuditEntryInput {
+  return {
+    recordType: 'communication_chase',
+    recordId: params.chaseId,
+    action: params.action,
+    field: params.field,
+    oldValue: `step=${params.stepIndex}`,
+    newValue: `tenant=${params.tenantId} chaseId=${params.chaseId} step=${params.stepIndex} outcome=${params.outcome}`,
+    byId: params.actorId,
+    at: params.at,
+  };
+}
+
+async function createIdempotentChaseEscalationTaskInTx(params: {
+  readonly ctx: TenantContext;
+  readonly chase: CommunicationChaseRecord;
+  readonly assignee: Person;
+  readonly escalationSpec: CommunicationChaseEscalationCandidatesSpec;
+  readonly escalationKey: string;
+  readonly title: string;
+  readonly description: string;
+  readonly notificationDetail: string;
+  readonly auditField: string;
+  readonly store: Awaited<ReturnType<typeof loadTenantCatalogueStoreView>>;
+  readonly tenantConfig: TenantConfiguration;
+  readonly actorId: string;
+  readonly nowIso: string;
+}): Promise<{ readonly taskId: string; readonly created: boolean }> {
+  const { ctx, chase, assignee, escalationSpec, escalationKey, store, tenantConfig, actorId, nowIso } = params;
+  const taskRepo = getTaskWorkflowRepository();
+  const primaryLink = escalationSpec.linkedRecords[0];
+  const existingLinkedTasks = primaryLink
+    ? await taskRepo.listTasksLinkedToRecord<Task>(
+        ctx,
+        primaryLink.recordType,
+        primaryLink.recordId,
+      )
+    : [];
+  const alreadyExists = existingLinkedTasks.find(
+    (t) =>
+      (t.systemKey === escalationKey || t.idempotencyKey === escalationKey) &&
+      isTaskOpen(t),
+  );
+  if (alreadyExists) {
+    return { taskId: alreadyExists.id, created: false };
+  }
+
+  const taskTypeId =
+    valueBySystemKey(store.values, 'task_type', 'follow_up')?.id ??
+    vid('task_type', 'Follow up');
+  const priorityId =
+    valueBySystemKey(store.values, 'task_priority', 'high')?.id ??
+    valueBySystemKey(store.values, 'task_priority', 'normal')?.id ??
+    vid('task_priority', 'Normal');
+  const newId = await taskRepo.allocateNextTaskId(ctx);
+  const task: Task = {
+    id: newId,
+    reference: newId,
+    title: params.title,
+    description: params.description,
+    taskTypeId,
+    priorityId,
+    dueAt: toIsoDate(new Date(nowIso)),
+    assignedTeamId: null,
+    assignedPersonId: assignee.id,
+    status: 'To do',
+    linkedRecords: escalationSpec.linkedRecords,
+    createdById: actorId,
+    createdAt: nowIso,
+    updatedById: actorId,
+    updatedAt: nowIso,
+    completedById: null,
+    completedAt: null,
+    comments: [],
+    autoTrigger: escalationSpec.autoTrigger,
+    idempotencyKey: escalationKey,
+    systemKey: escalationKey,
+  };
+  await taskRepo.putTask(ctx, task);
+  await appendTenantAuditEntries(ctx, [
+    {
+      recordType: 'task',
+      recordId: task.id,
+      action: 'create',
+      field: params.auditField,
+      oldValue: null,
+      newValue: `${task.reference} -> ${primaryLink?.recordType ?? chase.entityKind} ${primaryLink?.recordId ?? chase.entityId}`,
+      byId: actorId,
+      at: nowIso,
+    },
+  ]);
+  await pushNotification(ctx, {
+    recipientId: assignee.id,
+    kind: 'task_assigned',
+    title: `Task assigned to you: ${task.title}`,
+    detail: `${task.reference} · ${params.notificationDetail}`,
+    href: `/tasks/${task.id}`,
+    recordId: task.id,
+    matterId: escalationSpec.matterId ?? null,
+    knownMatterIds: escalationSpec.matterId ? [escalationSpec.matterId] : [],
+    knownTask: task,
+    tenantConfig,
+    byId: actorId,
+    at: nowIso,
+  });
+  return { taskId: task.id, created: true };
+}
+
 async function executeGenericChaseStep(params: {
   readonly adapter: CommunicationChaseAdapter<unknown>;
   readonly tx: TenantSqlClient;
@@ -39576,11 +39711,13 @@ async function executeGenericChaseStep(params: {
   readonly people: readonly Person[];
   readonly teams: readonly Team[];
   readonly rbacConfig: RbacConfiguration;
+  readonly triggeredById: string;
   readonly nowIso: string;
 }): Promise<{
   readonly queuedEmailId?: string | null;
   readonly createdTaskId?: string | null;
   readonly stoppedReason?: CommunicationChaseStoppedReason | null;
+  readonly needsOwner?: boolean;
 }> {
   const {
     adapter,
@@ -39593,9 +39730,12 @@ async function executeGenericChaseStep(params: {
     people,
     teams,
     rbacConfig,
+    triggeredById,
     nowIso,
   } = params;
   const chasingRepo = getChasingRepository();
+  const stepIndex: 1 | 2 | 3 =
+    chase.nextStepIndex >= 3 ? 3 : chase.nextStepIndex === 2 ? 2 : 1;
 
   const stopDecision = await adapter.checkStop({
     tx,
@@ -39605,18 +39745,30 @@ async function executeGenericChaseStep(params: {
     nowIso,
   });
   if (stopDecision.stop) {
-    await chasingRepo.stopChaseByIdInTx(tx, ctx, {
+    const stopped = await chasingRepo.stopChaseByIdInTx(tx, ctx, {
       chaseId: chase.id,
       reason: stopDecision.reason,
-      stoppedByPersonId: ctx.actorId,
+      stoppedByPersonId: triggeredById,
       stoppedAt: nowIso,
     });
+    if (stopped && stopped.status === 'stopped') {
+      await appendTenantAuditEntries(ctx, [
+        buildZeroPiiChaseStepAuditEntry({
+          tenantId: ctx.tenantId,
+          chaseId: chase.id,
+          stepIndex,
+          action: 'communication_chase.step_stopped',
+          field: 'Chase stopped',
+          outcome: `stopped:${stopDecision.reason}`,
+          actorId: triggeredById,
+          at: nowIso,
+        }),
+      ]);
+    }
     return { stoppedReason: stopDecision.reason };
   }
 
   const subject = stopDecision.subject;
-  const stepIndex: 1 | 2 | 3 =
-    chase.nextStepIndex >= 3 ? 3 : chase.nextStepIndex === 2 ? 2 : 1;
 
   if (stepIndex === 1 || stepIndex === 2) {
     const nextActionAtIso =
@@ -39627,7 +39779,7 @@ async function executeGenericChaseStep(params: {
     const recipientEmail = chase.recipientEmail?.trim() || '';
     const recipientName = chase.recipientName?.trim() || 'Client';
     if (!rule.sendEmails) {
-      await chasingRepo.recordChaseStepEventAndAdvanceInTx(tx, ctx, {
+      const adv = await chasingRepo.recordChaseStepEventAndAdvanceInTx(tx, ctx, {
         chaseId: chase.id,
         stepIndex,
         actionKind: 'chase_email',
@@ -39635,10 +39787,24 @@ async function executeGenericChaseStep(params: {
         executedAt: nowIso,
         nextActionAt: nextActionAtIso,
       });
+      if (!adv.alreadyExecuted) {
+        await appendTenantAuditEntries(ctx, [
+          buildZeroPiiChaseStepAuditEntry({
+            tenantId: ctx.tenantId,
+            chaseId: chase.id,
+            stepIndex,
+            action: 'communication_chase.step_skipped',
+            field: 'Chase step skipped',
+            outcome: 'skipped_emails_disabled',
+            actorId: triggeredById,
+            at: nowIso,
+          }),
+        ]);
+      }
       return {};
     }
     if (!recipientEmail || !isValidEmailAddress(recipientEmail)) {
-      await chasingRepo.recordChaseStepEventAndAdvanceInTx(tx, ctx, {
+      const adv = await chasingRepo.recordChaseStepEventAndAdvanceInTx(tx, ctx, {
         chaseId: chase.id,
         stepIndex,
         actionKind: 'chase_email',
@@ -39646,6 +39812,20 @@ async function executeGenericChaseStep(params: {
         executedAt: nowIso,
         nextActionAt: nextActionAtIso,
       });
+      if (!adv.alreadyExecuted) {
+        await appendTenantAuditEntries(ctx, [
+          buildZeroPiiChaseStepAuditEntry({
+            tenantId: ctx.tenantId,
+            chaseId: chase.id,
+            stepIndex,
+            action: 'communication_chase.step_skipped',
+            field: 'Chase step skipped',
+            outcome: 'skipped_no_recipient',
+            actorId: triggeredById,
+            at: nowIso,
+          }),
+        ]);
+      }
       return {};
     }
 
@@ -39679,7 +39859,7 @@ async function executeGenericChaseStep(params: {
       correlationId: ctx.correlationId,
     });
 
-    await chasingRepo.recordChaseStepEventAndAdvanceInTx(tx, ctx, {
+    const adv = await chasingRepo.recordChaseStepEventAndAdvanceInTx(tx, ctx, {
       chaseId: chase.id,
       stepIndex,
       actionKind: 'chase_email',
@@ -39688,10 +39868,24 @@ async function executeGenericChaseStep(params: {
       executedAt: nowIso,
       nextActionAt: nextActionAtIso,
     });
+    if (!adv.alreadyExecuted) {
+      await appendTenantAuditEntries(ctx, [
+        buildZeroPiiChaseStepAuditEntry({
+          tenantId: ctx.tenantId,
+          chaseId: chase.id,
+          stepIndex,
+          action: 'communication_chase.step_executed',
+          field: 'Chase email queued',
+          outcome: `email_queued:${queued.record.id}`,
+          actorId: triggeredById,
+          at: nowIso,
+        }),
+      ]);
+    }
     return { queuedEmailId: queued.deduplicated ? null : queued.record.id };
   }
 
-  // Step 3: Raise fee-earner escalation task for an active permitted participant
+  // Step 3: Raise fee-earner escalation task for an active permitted participant (R837 fallback)
   const escalationSpec = await adapter.escalationCandidates({
     tx,
     ctx,
@@ -39709,108 +39903,68 @@ async function executeGenericChaseStep(params: {
     people,
   });
   if (!assignee) {
-    await chasingRepo.recordChaseStepEventAndAdvanceInTx(tx, ctx, {
+    const needsOwnerRes = await chasingRepo.markChaseNeedsOwnerInTx(tx, ctx, {
       chaseId: chase.id,
       stepIndex: 3,
-      actionKind: 'escalation_task',
-      outcome: 'skipped_no_recipient',
       executedAt: nowIso,
-      nextActionAt: null,
     });
-    return {};
+    if (!needsOwnerRes.alreadyRecorded) {
+      await appendTenantAuditEntries(ctx, [
+        buildZeroPiiChaseStepAuditEntry({
+          tenantId: ctx.tenantId,
+          chaseId: chase.id,
+          stepIndex: 3,
+          action: 'communication_chase.escalation_unassigned',
+          field: 'Chase escalation unassigned',
+          outcome: 'escalation_unassigned',
+          actorId: triggeredById,
+          at: nowIso,
+        }),
+      ]);
+    }
+    return { needsOwner: true };
   }
 
-  const taskRepo = getTaskWorkflowRepository();
-  const escalationKey = `chase:${chase.id}:step:3`;
-  const primaryLink = escalationSpec.linkedRecords[0];
-  const existingLinkedTasks = primaryLink
-    ? await taskRepo.listTasksLinkedToRecord<Task>(
-        ctx,
-        primaryLink.recordType,
-        primaryLink.recordId,
-      )
-    : [];
-  const alreadyExists = existingLinkedTasks.find(
-    (t) =>
-      (t.systemKey === escalationKey || t.idempotencyKey === escalationKey) &&
-      isTaskOpen(t),
-  );
-  let taskId = alreadyExists?.id ?? null;
+  const taskRes = await createIdempotentChaseEscalationTaskInTx({
+    ctx,
+    chase,
+    assignee,
+    escalationSpec,
+    escalationKey: `chase:${chase.id}:step:3`,
+    title: escalationSpec.taskTitle,
+    description: escalationSpec.taskDescription,
+    notificationDetail: escalationSpec.notificationDetail,
+    auditField: escalationSpec.auditField,
+    store,
+    tenantConfig,
+    actorId: triggeredById,
+    nowIso,
+  });
 
-  if (!alreadyExists) {
-    const taskTypeId =
-      valueBySystemKey(store.values, 'task_type', 'follow_up')?.id ??
-      vid('task_type', 'Follow up');
-    const priorityId =
-      valueBySystemKey(store.values, 'task_priority', 'high')?.id ??
-      valueBySystemKey(store.values, 'task_priority', 'normal')?.id ??
-      vid('task_priority', 'Normal');
-    const newId = await taskRepo.allocateNextTaskId(ctx);
-    const task: Task = {
-      id: newId,
-      reference: newId,
-      title: escalationSpec.taskTitle,
-      description: escalationSpec.taskDescription,
-      taskTypeId,
-      priorityId,
-      dueAt: toIsoDate(new Date(nowIso)),
-      assignedTeamId: null,
-      assignedPersonId: assignee.id,
-      status: 'To do',
-      linkedRecords: escalationSpec.linkedRecords,
-      createdById: ctx.actorId,
-      createdAt: nowIso,
-      updatedById: ctx.actorId,
-      updatedAt: nowIso,
-      completedById: null,
-      completedAt: null,
-      comments: [],
-      autoTrigger: escalationSpec.autoTrigger,
-      idempotencyKey: escalationKey,
-      systemKey: escalationKey,
-    };
-    await taskRepo.putTask(ctx, task);
-    taskId = task.id;
-    await appendTenantAuditEntries(ctx, [
-      {
-        recordType: 'task',
-        recordId: task.id,
-        action: 'create',
-        field: escalationSpec.auditField,
-        oldValue: null,
-        newValue: `${task.reference} -> ${primaryLink?.recordType ?? chase.entityKind} ${primaryLink?.recordId ?? chase.entityId}`,
-        byId: ctx.actorId,
-        at: nowIso,
-      },
-    ]);
-    await pushNotification(ctx, {
-      recipientId: assignee.id,
-      kind: 'task_assigned',
-      title: `Task assigned to you: ${task.title}`,
-      detail: `${task.reference} · ${escalationSpec.notificationDetail}`,
-      href: `/tasks/${task.id}`,
-      recordId: task.id,
-      matterId: escalationSpec.matterId ?? null,
-      knownMatterIds: escalationSpec.matterId
-        ? [escalationSpec.matterId]
-        : [],
-      knownTask: task,
-      tenantConfig,
-      byId: ctx.actorId,
-      at: nowIso,
-    });
-  }
-
-  await chasingRepo.recordChaseStepEventAndAdvanceInTx(tx, ctx, {
+  const adv = await chasingRepo.recordChaseStepEventAndAdvanceInTx(tx, ctx, {
     chaseId: chase.id,
     stepIndex: 3,
     actionKind: 'escalation_task',
     outcome: 'executed',
-    taskId,
+    taskId: taskRes.taskId,
     executedAt: nowIso,
     nextActionAt: null,
   });
-  return { createdTaskId: taskId };
+  if (!adv.alreadyExecuted) {
+    await appendTenantAuditEntries(ctx, [
+      buildZeroPiiChaseStepAuditEntry({
+        tenantId: ctx.tenantId,
+        chaseId: chase.id,
+        stepIndex: 3,
+        action: 'communication_chase.step_executed',
+        field: 'Chase escalation raised',
+        outcome: `escalation_raised:${taskRes.taskId}`,
+        actorId: triggeredById,
+        at: nowIso,
+      }),
+    ]);
+  }
+  return { createdTaskId: taskRes.taskId };
 }
 
 export interface CommunicationChasesJobSummary {
@@ -39821,6 +39975,8 @@ export interface CommunicationChasesJobSummary {
   readonly tasksCreatedCount: number;
   readonly autoStoppedCount: number;
   readonly skippedCount: number;
+  readonly needsOwnerCount: number;
+  readonly failedCount: number;
 }
 
 export async function executeCommunicationChasesForTenant(
@@ -39874,6 +40030,8 @@ export async function executeCommunicationChasesForTenant(
         let tasksCreatedCount = 0;
         let autoStoppedCount = 0;
         let skippedCount = 0;
+        let needsOwnerCount = 0;
+        let failedCount = 0;
 
         if (dueChases.length > 0) {
           const [store, staffPeople, teams, rbacOverride] = await Promise.all([
@@ -39891,49 +40049,182 @@ export async function executeCommunicationChasesForTenant(
               )
             : getDefaultTenantRbacConfig(ctx.tenantId);
 
-          for (const candidate of dueChases) {
-            const lockedChase = await chasingRepo.lockDueChaseForUpdateInTx(
-              tx,
-              ctx,
-              candidate.id,
-            );
-            if (!lockedChase) {
-              skippedCount += 1;
-              continue;
-            }
-            const adapter = COMMUNICATION_CHASE_ADAPTERS.get(
-              lockedChase.entityKind,
-            );
-            if (!adapter) {
-              skippedCount += 1;
-              continue;
-            }
-            const rule = effectiveChasing[adapter.ruleKey];
-            if (!rule.enabled) {
-              skippedCount += 1;
-              continue;
-            }
-            const stepResult = await executeGenericChaseStep({
-              adapter,
-              tx,
-              ctx,
-              chase: lockedChase,
-              rule,
-              tenantConfig,
-              store,
-              people: staffPeople,
-              teams,
-              rbacConfig: effectiveRbac,
-              nowIso,
-            });
-            if (stepResult.stoppedReason) {
-              autoStoppedCount += 1;
-            } else if (stepResult.queuedEmailId) {
-              emailsQueuedCount += 1;
-            } else if (stepResult.createdTaskId) {
-              tasksCreatedCount += 1;
-            } else {
-              skippedCount += 1;
+          for (let candidateIdx = 0; candidateIdx < dueChases.length; candidateIdx++) {
+            const candidate = dueChases[candidateIdx]!;
+            const runOne = async (): Promise<void> => {
+              const lockedChase = await chasingRepo.lockDueChaseForUpdateInTx(
+                tx,
+                ctx,
+                candidate.id,
+              );
+              if (!lockedChase) {
+                skippedCount += 1;
+                return;
+              }
+              const adapter = COMMUNICATION_CHASE_ADAPTERS.get(
+                lockedChase.entityKind,
+              );
+              if (!adapter) {
+                skippedCount += 1;
+                return;
+              }
+              const rule = effectiveChasing[adapter.ruleKey];
+              if (!rule.enabled) {
+                const disabledStep: 1 | 2 | 3 =
+                  lockedChase.nextStepIndex >= 3
+                    ? 3
+                    : lockedChase.nextStepIndex === 2
+                      ? 2
+                      : 1;
+                await appendTenantAuditEntries(ctx, [
+                  buildZeroPiiChaseStepAuditEntry({
+                    tenantId: ctx.tenantId,
+                    chaseId: lockedChase.id,
+                    stepIndex: disabledStep,
+                    action: 'communication_chase.step_skipped',
+                    field: 'Chase step skipped',
+                    outcome: 'skipped_disabled',
+                    actorId: options.triggeredById,
+                    at: nowIso,
+                  }),
+                ]);
+                skippedCount += 1;
+                return;
+              }
+              const stepResult = await executeGenericChaseStep({
+                adapter,
+                tx,
+                ctx,
+                chase: lockedChase,
+                rule,
+                tenantConfig,
+                store,
+                people: staffPeople,
+                teams,
+                rbacConfig: effectiveRbac,
+                triggeredById: options.triggeredById,
+                nowIso,
+              });
+              if (stepResult.stoppedReason) {
+                autoStoppedCount += 1;
+              } else if (stepResult.queuedEmailId) {
+                emailsQueuedCount += 1;
+              } else if (stepResult.createdTaskId) {
+                tasksCreatedCount += 1;
+              } else if (stepResult.needsOwner) {
+                needsOwnerCount += 1;
+                skippedCount += 1;
+              } else {
+                skippedCount += 1;
+              }
+            };
+
+            try {
+              if (tx.withSavepoint) {
+                await tx.withSavepoint(`sp_chase_${candidateIdx}`, runOne);
+              } else {
+                await runOne();
+              }
+            } catch (chaseErr) {
+              const errorCode = sanitizeJobErrorCode(chaseErr);
+              const stepIndex: 1 | 2 | 3 =
+                candidate.nextStepIndex >= 3
+                  ? 3
+                  : candidate.nextStepIndex === 2
+                    ? 2
+                    : 1;
+              const actionKind =
+                stepIndex === 3 ? 'escalation_task' : 'chase_email';
+              const failRes = await chasingRepo.recordChaseFailureInTx(tx, ctx, {
+                chaseId: candidate.id,
+                stepIndex,
+                actionKind,
+                errorCode,
+                executedAt: nowIso,
+                maxConsecutiveFailures: 3,
+              });
+              await appendTenantAuditEntries(ctx, [
+                buildZeroPiiChaseStepAuditEntry({
+                  tenantId: ctx.tenantId,
+                  chaseId: candidate.id,
+                  stepIndex,
+                  action: 'communication_chase.step_failed',
+                  field: 'Chase step failed',
+                  outcome: `step_failed:${errorCode}:count=${failRes.chase.consecutiveFailureCount}${failRes.markedFailed ? ':failed' : ''}`,
+                  actorId: options.triggeredById,
+                  at: nowIso,
+                }),
+              ]);
+              if (failRes.markedFailed) {
+                const failAdapter = COMMUNICATION_CHASE_ADAPTERS.get(
+                  candidate.entityKind,
+                );
+                if (failAdapter) {
+                  const failStop = await failAdapter.checkStop({
+                    tx,
+                    ctx,
+                    chase: failRes.chase,
+                    store,
+                    nowIso,
+                  });
+                  if (!failStop.stop) {
+                    const failSpec = await failAdapter.escalationCandidates({
+                      tx,
+                      ctx,
+                      chase: failRes.chase,
+                      rule: effectiveChasing[failAdapter.ruleKey],
+                      subject: failStop.subject,
+                      people: staffPeople,
+                      teams,
+                      rbacConfig: effectiveRbac,
+                      nowIso,
+                    });
+                    const assignee = resolveEligibleChaseEscalationAssignee({
+                      orderedPersonIds: failSpec.orderedPersonIds,
+                      canPersonAccessSubject: failSpec.canPersonAccessSubject,
+                      people: staffPeople,
+                    });
+                    if (assignee) {
+                      const failTask =
+                        await createIdempotentChaseEscalationTaskInTx({
+                          ctx,
+                          chase: failRes.chase,
+                          assignee,
+                          escalationSpec: failSpec,
+                          escalationKey: `chase:${candidate.id}:failed_escalation`,
+                          title: failSpec.failureTaskTitle ?? failSpec.taskTitle,
+                          description:
+                            failSpec.failureTaskDescription ??
+                            failSpec.taskDescription,
+                          notificationDetail:
+                            'Communication chase failed 3 times',
+                          auditField: 'Chase failure escalation task',
+                          store,
+                          tenantConfig,
+                          actorId: options.triggeredById,
+                          nowIso,
+                        });
+                      if (failTask.created) {
+                        tasksCreatedCount += 1;
+                      }
+                    } else {
+                      await appendTenantAuditEntries(ctx, [
+                        buildZeroPiiChaseStepAuditEntry({
+                          tenantId: ctx.tenantId,
+                          chaseId: candidate.id,
+                          stepIndex,
+                          action: 'communication_chase.escalation_unassigned',
+                          field: 'Chase escalation unassigned',
+                          outcome: 'escalation_unassigned',
+                          actorId: options.triggeredById,
+                          at: nowIso,
+                        }),
+                      ]);
+                    }
+                  }
+                }
+              }
+              failedCount += 1;
             }
           }
         }
@@ -39946,6 +40237,8 @@ export async function executeCommunicationChasesForTenant(
           tasksCreatedCount,
           autoStoppedCount,
           skippedCount,
+          needsOwnerCount,
+          failedCount,
         };
 
         await appendTenantAuditEntries(ctx, [
@@ -39955,7 +40248,7 @@ export async function executeCommunicationChasesForTenant(
             action: 'job-run',
             field: 'Communication chasing sweep',
             oldValue: '',
-            newValue: `date=${localDate} due=${dueChases.length} emails=${emailsQueuedCount} tasks=${tasksCreatedCount} stopped=${autoStoppedCount}`,
+            newValue: `date=${localDate} due=${dueChases.length} emails=${emailsQueuedCount} tasks=${tasksCreatedCount} stopped=${autoStoppedCount} needsOwner=${needsOwnerCount} failed=${failedCount}`,
             byId: options.triggeredById,
             at: nowIso,
           },
@@ -39973,6 +40266,8 @@ export async function executeCommunicationChasesForTenant(
             tasksCreatedCount,
             autoStoppedCount,
             skippedCount,
+            needsOwnerCount,
+            failedCount,
           }),
         );
 
@@ -39984,7 +40279,10 @@ export async function executeCommunicationChasesForTenant(
             tasksCreatedCount,
             autoStoppedCount,
             skippedCount,
+            needsOwnerCount,
+            failedCount,
           },
+          ...(failedCount > 0 ? { deferDailyCompletion: true } : {}),
         };
       },
     },

@@ -7,13 +7,16 @@ import {
   TenantDocumentRepository,
   TenantEngagementRepository,
   TenantEvidenceArtifactRepository,
+  TenantHrAndRbacRepository,
   TenantIntakeCheckRepository,
+  TenantJobRunRepository,
   TenantMatterRepository,
   TenantMigrationRunner,
   TenantOutboxRepository,
   TenantPartyRepository,
   TenantPostgresPoolManager,
   TenantTaskWorkflowRepository,
+  createDirectMigrationClient,
   loadAndValidateTenantConfig,
   resolveTenantFromVerifiedToken,
   type TenantContext,
@@ -1770,5 +1773,374 @@ describe('S1-06: Client Care dispatch, Monotonic B2, R817 purpose decoupling, R8
       setActiveTenantConfigForTesting(null);
       await poolManager.closeAllPools();
     }
+  }, 45_000);
+
+  it('6. R833 & R841: savepoint isolates single failing chase (PG trigger), marks partial run, escalates on 3rd failure, and audits every chase step', async () => {
+    await resetAllDemoData('P-000004', testDataResetContext());
+    const ctx = testTenantCtx('P-000001');
+    const chasingRepo = new TenantChasingRepository();
+    const outboxRepo = new TenantOutboxRepository();
+    const taskRepo = new TenantTaskWorkflowRepository();
+    const auditRepo = new TenantAuditRepository();
+    const jobRunRepo = new TenantJobRunRepository();
+
+    const chaseCfg = loadAndValidateTenantConfig(
+      notALawFirmBaseConfig as unknown as Record<string, unknown>,
+      {
+        tenantId: 'not-a-law-firm',
+        integrations: {
+          ...((notALawFirmBaseConfig as unknown as { integrations: Record<string, unknown> })
+            .integrations ?? {}),
+          email: { provider: 'disabled' },
+        },
+        chasing: {
+          engagementLetter: {
+            enabled: true,
+            sendEmails: true,
+            firstChaseDays: 7,
+            secondChaseDays: 14,
+            escalateTaskDays: 21,
+          },
+          quote: { enabled: false, sendEmails: false, firstChaseDays: 7, secondChaseDays: 14, escalateTaskDays: 21 },
+          moneyOnAccount: { enabled: false, sendEmails: false, firstChaseDays: 7, secondChaseDays: 14, escalateTaskDays: 21 },
+        },
+      },
+      'test',
+    );
+
+    const matterIds: string[] = [];
+    await runAsActionActor(
+      'P-000001',
+      async () => {
+        for (const label of ['One', 'Two-Fail', 'Three']) {
+          const mRes = await saveMatterRecord(
+            {
+              title: `R833 Savepoint Matter ${label}`,
+              clientId: 'O-000001',
+              practiceAreaId: 'work_type.employment_and_hr',
+              workTypeSubcategoryId: 'work_type.employment_and_hr_tribunal_claims',
+              responsiblePartnerId: 'P-000001',
+              supervisingPartnerId: 'P-000001',
+              leadFeeEarnerId: 'P-000002',
+              teamMemberIds: ['P-000001', 'P-000002'],
+              conflictCheckRecord: makeConflictRecord('P-000001', 'Rhian Morgan'),
+              riskAssessment: { answers: BASE_LOW_RISK_ANSWERS },
+            },
+            { byId: 'P-000001', saveMode: 'submit_cleared' },
+          );
+          matterIds.push(mRes.matter!.id);
+        }
+      },
+      { roles: ['partner'], mfaVerified: false },
+    );
+
+    const chases = [] as NonNullable<
+      Extract<Awaited<ReturnType<typeof sendEngagementLetterRecord>>, { ok: true }>['chase']
+    >[];
+    for (let i = 0; i < matterIds.length; i++) {
+      const sRes = await runAsActionActor(
+        'P-000001',
+        () =>
+          sendEngagementLetterRecord(
+            { matterId: matterIds[i]!, recipientEmail: `r833-${i}@example.test` },
+            'P-000001',
+            { tenantConfig: chaseCfg, drainAfterCommit: false },
+          ),
+        { roles: ['partner'], mfaVerified: false },
+      );
+      expect(sRes.ok).toBe(true);
+      if (!sRes.ok || !sRes.chase) return;
+      chases.push(sRes.chase);
+    }
+
+    const [chase1, chase2, chase3] = chases as [
+      (typeof chases)[number],
+      (typeof chases)[number],
+      (typeof chases)[number],
+    ];
+    const day7Now = addDays(new Date(chase3.sentAt), 8);
+    day7Now.setUTCHours(9, 0, 0, 0);
+
+    // Install a temporary PostgreSQL BEFORE INSERT trigger on email_outbox that fails ONLY chase2 step 1
+    const direct = await createDirectMigrationClient({ ctx });
+    try {
+      await direct.query(`
+        CREATE OR REPLACE FUNCTION public.test_fail_r833_chase_fn()
+        RETURNS trigger
+        LANGUAGE plpgsql
+        AS $$
+        BEGIN
+          IF NEW.idempotency_key = 'chase:${chase2.id}:step:1' THEN
+            RAISE EXCEPTION 'R833_SIMULATED_OUTBOX_FAILURE';
+          END IF;
+          RETURN NEW;
+        END;
+        $$;
+        DROP TRIGGER IF EXISTS trg_test_fail_r833_chase ON public.email_outbox;
+        CREATE TRIGGER trg_test_fail_r833_chase
+          BEFORE INSERT ON public.email_outbox
+          FOR EACH ROW EXECUTE FUNCTION public.test_fail_r833_chase_fn();
+      `);
+
+      const run1 = await executeCommunicationChasesForTenant(ctx, {
+        triggerSource: 'scheduled',
+        triggeredById: 'system:communication-chases',
+        tenantConfig: chaseCfg,
+        drainAfterCommit: false,
+        now: day7Now,
+      });
+      expect(run1.outcome).toBe('executed');
+      if (run1.outcome === 'executed') {
+        expect(run1.result.summary.dueEvaluated).toBe(3);
+        expect(run1.result.summary.emailsQueuedCount).toBe(2);
+        expect(run1.result.summary.failedCount).toBe(1);
+        expect(run1.jobRun.status).toBe('running');
+        expect(run1.jobRun.summary.scope).toBe('partial');
+      }
+
+      // Chases 1 & 3 succeeded and committed; chase 2 rolled back cleanly and stayed on step 1
+      const c1After = await chasingRepo.getChaseById(ctx, chase1.id);
+      const c2After1 = await chasingRepo.getChaseById(ctx, chase2.id);
+      const c3After = await chasingRepo.getChaseById(ctx, chase3.id);
+      expect(c1After?.nextStepIndex).toBe(2);
+      expect(c3After?.nextStepIndex).toBe(2);
+      expect(c2After1?.status).toBe('active');
+      expect(c2After1?.nextStepIndex).toBe(1);
+      expect(c2After1?.consecutiveFailureCount).toBe(1);
+      expect(c2After1?.lastErrorCode).toBeTruthy();
+
+      const outboxAfter1 = await outboxRepo.listOutboxRecords(ctx, { limit: 100 });
+      expect(outboxAfter1.some((r) => r.idempotencyKey === `chase:${chase1.id}:step:1`)).toBe(true);
+      expect(outboxAfter1.some((r) => r.idempotencyKey === `chase:${chase3.id}:step:1`)).toBe(true);
+      expect(outboxAfter1.some((r) => r.idempotencyKey === `chase:${chase2.id}:step:1`)).toBe(false);
+
+      // Scheduled retry on same day runs because scope === 'partial' -> strike 2, then strike 3 -> 'failed' + 1 task
+      const run2 = await executeCommunicationChasesForTenant(ctx, {
+        triggerSource: 'scheduled',
+        triggeredById: 'system:communication-chases',
+        tenantConfig: chaseCfg,
+        drainAfterCommit: false,
+        now: new Date(day7Now.getTime() + 60_000),
+      });
+      expect(run2.outcome).toBe('executed');
+      expect((await chasingRepo.getChaseById(ctx, chase2.id))?.consecutiveFailureCount).toBe(2);
+
+      const run3 = await executeCommunicationChasesForTenant(ctx, {
+        triggerSource: 'scheduled',
+        triggeredById: 'system:communication-chases',
+        tenantConfig: chaseCfg,
+        drainAfterCommit: false,
+        now: new Date(day7Now.getTime() + 120_000),
+      });
+      expect(run3.outcome).toBe('executed');
+      const c2Failed = await chasingRepo.getChaseById(ctx, chase2.id);
+      expect(c2Failed?.status).toBe('failed');
+      expect(c2Failed?.consecutiveFailureCount).toBe(3);
+
+      const failTasks = await taskRepo.listTasksLinkedToRecord<Task>(ctx, 'matter', matterIds[1]!);
+      const failureEscTasks = failTasks.filter((t) => t.systemKey === `chase:${chase2.id}:failed_escalation`);
+      expect(failureEscTasks).toHaveLength(1);
+      expect(failureEscTasks[0]?.assignedPersonId).toBe('P-000002');
+
+      // R841: Verify zero-PII per-step audit entries for queued & failed steps, plus skipped step
+      const sendDisabledCfg = loadAndValidateTenantConfig(
+        notALawFirmBaseConfig as unknown as Record<string, unknown>,
+        {
+          tenantId: 'not-a-law-firm',
+          integrations: chaseCfg.integrations,
+          chasing: {
+            ...chaseCfg.chasing!,
+            engagementLetter: {
+              ...chaseCfg.chasing!.engagementLetter,
+              sendEmails: false,
+            },
+          },
+        },
+        'test',
+      );
+      await executeCommunicationChasesForTenant(ctx, {
+        triggerSource: 'manual',
+        triggeredById: 'system:communication-chases',
+        tenantConfig: sendDisabledCfg,
+        drainAfterCommit: false,
+        now: addDays(new Date(chase3.sentAt), 14),
+      });
+
+      const jobRuns = await jobRunRepo.listJobRuns(ctx, { jobKey: 'communication-chases' });
+      expect(jobRuns.some((r) => r.status === 'running' && r.summary.scope === 'partial')).toBe(true);
+
+      const c1Audits = await auditRepo.listAuditEntriesForRecord(ctx, 'communication_chase', chase1.id, { limit: 100 });
+      expect(c1Audits.map((a) => a.oldValue)).toEqual(expect.arrayContaining(['step=1', 'step=2']));
+      for (const a of c1Audits) {
+        expect(a.newValue).not.toContain('r833-');
+        expect(a.newValue).not.toContain('R833 Savepoint Matter');
+      }
+      const c2Audits = await auditRepo.listAuditEntriesForRecord(ctx, 'communication_chase', chase2.id, { limit: 100 });
+      const c2FailAudits = c2Audits.filter((a) => a.action === 'communication_chase.step_failed');
+      expect(c2FailAudits).toHaveLength(3);
+    } finally {
+      await direct.query(`
+        DROP TRIGGER IF EXISTS trg_test_fail_r833_chase ON public.email_outbox;
+        DROP FUNCTION IF EXISTS public.test_fail_r833_chase_fn();
+      `);
+      await direct.end();
+    }
+  }, 45_000);
+
+  it('7. R837: escalation falls back via supervising partner to owning team lead, and unassigned keeps chase needs_owner with zero-PII audit', async () => {
+    await resetAllDemoData('P-000004', testDataResetContext());
+    const ctx = testTenantCtx('P-000001');
+    const matterRepo = new TenantMatterRepository();
+    const chasingRepo = new TenantChasingRepository();
+    const taskRepo = new TenantTaskWorkflowRepository();
+    const auditRepo = new TenantAuditRepository();
+    const hrRepo = new TenantHrAndRbacRepository();
+
+    const chaseCfg = loadAndValidateTenantConfig(
+      notALawFirmBaseConfig as unknown as Record<string, unknown>,
+      {
+        tenantId: 'not-a-law-firm',
+        integrations: {
+          ...((notALawFirmBaseConfig as unknown as { integrations: Record<string, unknown> })
+            .integrations ?? {}),
+          email: { provider: 'disabled' },
+        },
+        chasing: {
+          engagementLetter: { enabled: true, sendEmails: false, firstChaseDays: 7, secondChaseDays: 14, escalateTaskDays: 21 },
+          quote: { enabled: false, sendEmails: false, firstChaseDays: 7, secondChaseDays: 14, escalateTaskDays: 21 },
+          moneyOnAccount: { enabled: false, sendEmails: false, firstChaseDays: 7, secondChaseDays: 14, escalateTaskDays: 21 },
+        },
+      },
+      'test',
+    );
+
+    const allTeams = await hrRepo.listAllTeams<{
+      id: string;
+      name: string;
+      description: string;
+      memberIds: string[];
+      leadIds: string[];
+      practiceAreaIds: string[];
+      active: boolean;
+      createdById: string;
+      createdAt: string;
+      updatedById: string;
+      updatedAt: string;
+    }>(ctx);
+    const empTeam =
+      allTeams.find(
+        (t) =>
+          t.active && t.practiceAreaIds.includes('work_type.employment_and_hr'),
+      ) ?? allTeams[0]!;
+    await hrRepo.putTeam(ctx, {
+      ...empTeam,
+      memberIds: Array.from(new Set([...empTeam.memberIds, 'P-000001', 'P-000002', 'P-000006'])),
+      leadIds: ['P-000006'],
+      practiceAreaIds: Array.from(new Set([...empTeam.practiceAreaIds, 'work_type.employment_and_hr'])),
+    });
+
+    let teamLeadFallbackMatterId = '';
+    let noOwnerMatterId = '';
+    await runAsActionActor(
+      'P-000001',
+      async () => {
+        const resTeam = await saveMatterRecord(
+          {
+            title: 'R837 Team Lead Fallback Walled',
+            clientId: 'O-000001',
+            practiceAreaId: 'work_type.employment_and_hr',
+            workTypeSubcategoryId: 'work_type.employment_and_hr_tribunal_claims',
+            responsiblePartnerId: 'P-000002',
+            supervisingPartnerId: 'P-000002',
+            leadFeeEarnerId: 'P-000002',
+            teamMemberIds: ['P-000002', 'P-000006'],
+            conflictCheckRecord: makeConflictRecord('P-000001', 'Rhian Morgan'),
+            riskAssessment: { answers: BASE_LOW_RISK_ANSWERS },
+          },
+          { byId: 'P-000001', saveMode: 'submit_cleared' },
+        );
+        teamLeadFallbackMatterId = resTeam.matter!.id;
+
+        const resNone = await saveMatterRecord(
+          {
+            title: 'Confidential Zero Owner Secret Title',
+            clientId: 'O-000001',
+            practiceAreaId: 'work_type.employment_and_hr',
+            workTypeSubcategoryId: 'work_type.employment_and_hr_tribunal_claims',
+            responsiblePartnerId: 'P-000002',
+            supervisingPartnerId: 'P-000002',
+            leadFeeEarnerId: 'P-000002',
+            teamMemberIds: ['P-000001', 'P-000002'],
+            conflictCheckRecord: makeConflictRecord('P-000001', 'Rhian Morgan'),
+            riskAssessment: { answers: BASE_LOW_RISK_ANSWERS },
+          },
+          { byId: 'P-000001', saveMode: 'submit_cleared' },
+        );
+        noOwnerMatterId = resNone.matter!.id;
+      },
+      { roles: ['partner'], mfaVerified: false },
+    );
+
+    // Send both while P-000001 can see them, then apply strict ethical walls
+    const sendTeam = await runAsActionActor(
+      'P-000001',
+      () => sendEngagementLetterRecord({ matterId: teamLeadFallbackMatterId, recipientEmail: 'tl@example.test' }, 'P-000001', { tenantConfig: chaseCfg, drainAfterCommit: false }),
+      { roles: ['partner'], mfaVerified: false },
+    );
+    const sendNone = await runAsActionActor(
+      'P-000001',
+      () => sendEngagementLetterRecord({ matterId: noOwnerMatterId, recipientEmail: 'none@example.test' }, 'P-000001', { tenantConfig: chaseCfg, drainAfterCommit: false }),
+      { roles: ['partner'], mfaVerified: false },
+    );
+    expect(sendTeam.ok && sendNone.ok).toBe(true);
+    if (!sendTeam.ok || !sendNone.ok) return;
+
+    const mTeam = (await matterRepo.getMatterById<Matter>(ctx, teamLeadFallbackMatterId, { includeRestricted: true }))!;
+    const mNone = (await matterRepo.getMatterById<Matter>(ctx, noOwnerMatterId, { includeRestricted: true }))!;
+    await matterRepo.withTenantTransaction(ctx, async () => {
+      await matterRepo.putMatter(
+        ctx,
+        { ...mTeam, hasEthicalWall: true, restrictedAccessUserIds: ['P-000006'] },
+        { expectedRowVersion: null, sqlRestrictedAccessUserIds: ['P-000006'] },
+      );
+      // Only P-000005 is permitted (neither lead, partner, supervisor, nor team lead P-000006)
+      await matterRepo.putMatter(
+        ctx,
+        { ...mNone, hasEthicalWall: true, restrictedAccessUserIds: ['P-000005'] },
+        { expectedRowVersion: null, sqlRestrictedAccessUserIds: ['P-000005'] },
+      );
+    });
+
+    const baseSent = new Date(sendNone.chase!.sentAt);
+    for (const dayOffset of [7, 14, 21]) {
+      await executeCommunicationChasesForTenant(ctx, {
+        triggerSource: 'manual',
+        triggeredById: 'system:communication-chases',
+        tenantConfig: chaseCfg,
+        drainAfterCommit: false,
+        now: addDays(baseSent, dayOffset),
+      });
+    }
+
+    // Team lead P-000006 received escalation for teamLeadFallbackMatterId
+    const teamTasks = await taskRepo.listTasksLinkedToRecord<Task>(ctx, 'matter', teamLeadFallbackMatterId);
+    const teamEsc = teamTasks.find((t) => t.autoTrigger === 'communication_chase_escalation');
+    expect(teamEsc?.assignedPersonId).toBe('P-000006');
+
+    // No-owner matter: ZERO tasks created, chase stays 'needs_owner', zero-PII unassigned audit written
+    const noneTasks = await taskRepo.listTasksLinkedToRecord<Task>(ctx, 'matter', noOwnerMatterId);
+    expect(noneTasks.filter((t) => t.autoTrigger === 'communication_chase_escalation')).toHaveLength(0);
+    const noneChaseAfter = await chasingRepo.getChaseById(ctx, sendNone.chase!.id);
+    expect(noneChaseAfter?.status).toBe('needs_owner');
+    expect(noneChaseAfter?.nextActionAt).toBeNull();
+
+    const noneAudits = await auditRepo.listAuditEntriesForRecord(ctx, 'communication_chase', sendNone.chase!.id, { limit: 100 });
+    const unassignedAudits = noneAudits.filter(
+      (a) => a.action === 'communication_chase.escalation_unassigned',
+    );
+    expect(unassignedAudits).toHaveLength(1);
+    expect(unassignedAudits[0]?.newValue).toContain('outcome=escalation_unassigned');
+    expect(unassignedAudits[0]?.newValue).not.toContain('Confidential Zero Owner Secret Title');
+    expect(unassignedAudits[0]?.newValue).not.toContain('none@example.test');
   }, 45_000);
 });

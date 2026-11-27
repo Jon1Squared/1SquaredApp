@@ -493,7 +493,10 @@ export function MatterProfileClient({
   const [engagementSelectedFile, setEngagementSelectedFile] = useState<File | null>(null);
   const [engagementBusy, setEngagementBusy] = useState(false);
   const activeEngagementChase = useMemo(
-    () => engagementChases.find((c) => c.chase.status === 'active') ?? null,
+    () =>
+      engagementChases.find(
+        (c) => c.chase.status === 'active' || c.chase.status === 'needs_owner',
+      ) ?? null,
     [engagementChases],
   );
   const canApproveReg = userPermissions.includes('register:approve');
@@ -2506,14 +2509,22 @@ export function MatterProfileClient({
                 >
                   <div>
                     <div style={{ fontWeight: 700, fontSize: 13 }}>
-                      Automated follow-up active
+                      {activeEngagementChase.chase.status === 'needs_owner'
+                        ? 'Follow-up needs an owner'
+                        : 'Automated follow-up active'}
                     </div>
                     <div className="muted" style={{ fontSize: 12.5 }}>
-                      Chasing {activeEngagementChase.chase.recipientEmail || 'client'} &middot;{' '}
-                      {activeEngagementChase.events.length} reminder step(s) completed &middot;{' '}
-                      {activeEngagementChase.chase.nextActionAt
-                        ? `Next action due ${formatDateTime(activeEngagementChase.chase.nextActionAt)}`
-                        : 'Final escalation stage'}
+                      {activeEngagementChase.chase.status === 'needs_owner'
+                        ? 'No eligible team member could be assigned for follow-up. Reassign matter access or stop chasing.'
+                        : (
+                          <>
+                            Chasing {activeEngagementChase.chase.recipientEmail || 'client'} &middot;{' '}
+                            {activeEngagementChase.events.length} reminder step(s) completed &middot;{' '}
+                            {activeEngagementChase.chase.nextActionAt
+                              ? `Next action due ${formatDateTime(activeEngagementChase.chase.nextActionAt)}`
+                              : 'Final escalation stage'}
+                          </>
+                        )}
                     </div>
                   </div>
                   {canEditMatter && !isMatterCurrentlyClosed ? (
