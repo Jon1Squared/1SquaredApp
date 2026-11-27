@@ -857,12 +857,12 @@ export const ACTION_PERMISSIONS = {
   },
   stopCommunicationChaseAction: {
     kind: 'permission',
-    key: { anyOf: ['matter:edit', 'quote:edit'] },
+    key: { anyOf: ['matter:edit', 'quote:edit', 'money_on_account:request'] },
     enforcedBy: 'service',
   },
   retryCommunicationChaseAction: {
     kind: 'permission',
-    key: { anyOf: ['matter:edit', 'quote:edit'] },
+    key: { anyOf: ['matter:edit', 'quote:edit', 'money_on_account:request'] },
     enforcedBy: 'service',
   },
   sendNonEngagementLetterAction: {
@@ -886,6 +886,36 @@ export const ACTION_PERMISSIONS = {
     enforcedBy: 'service',
   },
   getOutboxMessageForAdminAction: {
+    kind: 'permission',
+    key: 'admin:access',
+    enforcedBy: 'service',
+  },
+  createAndSendMoneyOnAccountRequestAction: {
+    kind: 'permission',
+    key: 'money_on_account:request',
+    enforcedBy: 'action',
+  },
+  cancelMoneyOnAccountRequestAction: {
+    kind: 'permission',
+    key: 'money_on_account:request',
+    enforcedBy: 'action',
+  },
+  recordMoneyOnAccountReceiptAction: {
+    kind: 'permission',
+    key: 'money_on_account:record_receipt',
+    enforcedBy: 'action',
+  },
+  matchPmsClientLedgerReceiptAction: {
+    kind: 'permission',
+    key: { allOf: ['money_on_account:record_receipt', 'finance:view_matter'] },
+    enforcedBy: 'action',
+  },
+  reverseMoneyOnAccountReceiptAction: {
+    kind: 'permission',
+    key: 'money_on_account:record_receipt',
+    enforcedBy: 'action',
+  },
+  saveMoneyOnAccountConfigAction: {
     kind: 'permission',
     key: 'admin:access',
     enforcedBy: 'service',
@@ -983,12 +1013,20 @@ export const ROUTE_PERMISSIONS = {
   },
   'POST /api/evidence/upload': {
     kind: 'permission',
-    key: { anyOf: ['cdd:record', 'matter:edit'] },
+    key: { anyOf: ['cdd:record', 'matter:edit', 'money_on_account:record_receipt'] },
     enforcedBy: 'service',
   },
   'GET /api/evidence/download': {
     kind: 'permission',
-    key: { anyOf: ['cdd:view', 'matter:edit', 'document:view'] },
+    key: {
+      anyOf: [
+        'cdd:view',
+        'matter:edit',
+        'document:view',
+        'money_on_account:view',
+        'money_on_account:record_receipt',
+      ],
+    },
     enforcedBy: 'service',
   },
   'GET /api/admin/outbox/[id]/attachments/[ordinal]': {

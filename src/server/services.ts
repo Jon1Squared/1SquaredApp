@@ -27,6 +27,7 @@ import {
   getIntakeQuoteRepository,
   getJobRunRepository,
   getMatterRepository,
+  getMoneyOnAccountRepository,
   getPartyRepository,
   getPmsRepository,
   getRateOverrideRepository,
@@ -58,6 +59,7 @@ export {
   getIntakeQuoteRepository,
   getJobRunRepository,
   getMatterRepository,
+  getMoneyOnAccountRepository,
   getPartyRepository,
   getPmsRepository,
   getRateOverrideRepository,
@@ -246,6 +248,19 @@ import {
   type OpeningGatePreconditionKey,
 } from '@/domain/openingGate';
 import {
+  areClientBankDetailsConfigured,
+  assertBankDetailsSafeForEnvironment,
+  buildMoneyOnAccountPaymentReference,
+  evaluateMatterFundsOnAccountGate,
+  formatMaskedMoaConfigAuditSummary,
+  isValidCalendarYmd,
+  renderMoneyOnAccountRequestContent,
+  renderMoneyOnAccountRequestPdfBytes,
+  resolveEffectiveMoneyOnAccountConfig,
+  resolveMatterAgreedPaymentOnAccountPence,
+  type MatterFundsOnAccountGateEvaluation,
+} from '@/domain/moneyOnAccount';
+import {
   computeServerWorkTypeRetentionState,
   instantiateWorkTypeAutoTasksInTx,
   syncOrgDepartmentsForPracticeAreaValue,
@@ -340,6 +355,7 @@ import {
   ALL_NOTIFICATION_KINDS,
   actorCanViewRegisterType,
   assertBlobKeyBelongsToTenant,
+  assertMoneyOnAccountSafeForEnvironment,
   BasicMergeEngine,
   buildCddChecklistItemsForTier,
   buildSafeTeamsActivityFromNotification,
@@ -348,6 +364,7 @@ import {
   CLIENT_CARE_DOCUMENT_TYPE,
   createDefaultFirmFeeArrangementCaps,
   createRegisterDomainError,
+  createTenantIntakeCheckProviders,
   DEFAULT_MATTER_NUMBERING_CONFIG,
   DEFAULT_NOTIFICATION_PREFERENCES_BY_KIND,
   DEFAULT_REGISTERS_CONFIG,
@@ -457,6 +474,10 @@ import type {
   MatterNumberingConfig,
   MatterOpeningGateOverrideRecord,
   MinorUnits,
+  MoneyOnAccountConfiguration,
+  MoneyOnAccountReceiptRecord,
+  MoneyOnAccountRequestRecord,
+  MoneyOnAccountRequestStatus,
   NotificationChannelFrequency,
   RegisterChecklistItemStatus,
   RegisterChecklistItemValue,
@@ -464,6 +485,7 @@ import type {
   ResolvedPermissionSet,
   SanctionsPepOutcome,
   SanctionsPepScreeningRecord,
+  StoppedCommunicationChaseRecord,
   TeamsActivityOutboxRecord,
   TeamsDevCatcherHandler,
   TeamsNotifier,
@@ -6376,6 +6398,49 @@ function applyOpeningGateCddOutcomeToMatter(
       : null;
 }
 
+async function evaluateMatterFundsOnAccountInTx(
+  tx: TenantSqlClient,
+  ctx: TenantContext,
+  matter: Pick<
+    Matter,
+    | 'id'
+    | 'sourceQuoteId'
+    | 'fieldValues'
+    | 'retainerMoniesOnAccountGbp'
+    | 'retainerMoniesOnAccountPence'
+  >,
+  options: { readonly lockRows?: boolean } = {},
+): Promise<MatterFundsOnAccountGateEvaluation> {
+  const hasPersistedMatterId = Boolean(matter.id && matter.id !== 'M-PENDING');
+  const moaRepo = getMoneyOnAccountRepository();
+  const [requests, receipts, sourceQuote] = await Promise.all([
+    hasPersistedMatterId
+      ? moaRepo.listRequestsForMatterInTx(tx, ctx, matter.id, {
+          forShare: Boolean(options.lockRows),
+        })
+      : Promise.resolve([]),
+    hasPersistedMatterId
+      ? moaRepo.listReceiptsForMatterInTx(tx, ctx, matter.id)
+      : Promise.resolve([]),
+    matter.sourceQuoteId
+      ? getIntakeQuoteRepository().getQuoteById<Quote>(
+          ctx,
+          matter.sourceQuoteId,
+          { includeRestricted: true },
+        )
+      : Promise.resolve(null),
+  ]);
+  const agreedAmountPence = resolveMatterAgreedPaymentOnAccountPence({
+    matter,
+    sourceQuote,
+  });
+  return evaluateMatterFundsOnAccountGate({
+    requests,
+    receipts,
+    agreedAmountPence,
+  });
+}
+
 async function evaluateOpeningGateForServerInTx(params: {
   tx: TenantSqlClient;
   ctx: TenantContext;
@@ -6430,12 +6495,15 @@ async function evaluateOpeningGateForServerInTx(params: {
     people,
     organisations,
   });
-  const rawOverrides = hasPersistedMatterId
-    ? await matterRepo.listOpeningGateOverridesForMatterInTx(tx, ctx, matter.id, {
-        activeOnly: true,
-        forUpdate: true,
-      })
-    : [];
+  const [rawOverrides, fundsEval] = await Promise.all([
+    hasPersistedMatterId
+      ? matterRepo.listOpeningGateOverridesForMatterInTx(tx, ctx, matter.id, {
+          activeOnly: true,
+          forUpdate: true,
+        })
+      : Promise.resolve([]),
+    evaluateMatterFundsOnAccountInTx(tx, ctx, matter, { lockRows: true }),
+  ]);
 
   const gateConfig = resolveWorkTypeOpeningGate(workTypesConfig, {
     workTypeSubcategoryId: matter.workTypeSubcategoryId,
@@ -6486,7 +6554,8 @@ async function evaluateOpeningGateForServerInTx(params: {
     highRiskRecord: selectedHro,
     highRiskPartnerApprover: partnerApprover,
     requiresHighRiskApproval,
-    fundsOnAccountSatisfied: false,
+    fundsOnAccountSatisfied: fundsEval.fundsOnAccountSatisfied,
+    fundsOnAccountSummary: fundsEval.statusSummary,
   });
   const cddRawSatisfied =
     cddStatus.status === 'recorded' &&
@@ -31052,6 +31121,12 @@ const EXPOSED_REGISTER_SERVICE_ERROR_CODES = new Set<string>([
   'EMAIL_ATTACHMENT_SIZE_LIMIT_EXCEEDED',
   'CHASING_VALIDATION_ERROR',
   'ENGAGEMENT_CONFIG_VALIDATION_ERROR',
+  'MOA_NOT_CONFIGURED',
+  'MOA_LIVE_PLACEHOLDER_BANK_DETAILS_FORBIDDEN',
+  'MOA_PMS_RECEIPT_ALREADY_MATCHED',
+  'MOA_PAYMENT_REFERENCE_CONFLICT',
+  'MOA_REQUEST_IDEMPOTENCY_CONFLICT',
+  'MOA_CONFIG_VALIDATION_ERROR',
   OPENING_GATE_OVERRIDE_ERROR_CODES.FORBIDDEN,
   OPENING_GATE_OVERRIDE_ERROR_CODES.VALIDATION,
   OPENING_GATE_OVERRIDE_ERROR_CODES.BLOCKED,
@@ -34320,8 +34395,9 @@ function isPurposePermittedForEvidenceUpload(
   if (purpose === 'engagement_signed') {
     return permSet.permissions.has('matter:edit');
   }
-  // R843: 'moa_receipt' remains disabled until S1-08 §3 wires
-  // money_on_account:record_receipt / money_on_account:view / document:view permissions.
+  if (purpose === 'moa_receipt') {
+    return permSet.permissions.has('money_on_account:record_receipt');
+  }
   return false;
 }
 
@@ -34340,8 +34416,14 @@ function isStoredPurposePermittedForEvidenceDownload(
         permSet.permissions.has('matter:edit'))
     );
   }
-  // R843: 'moa_receipt' downloads stay disabled until S1-08 §3
-  // (money_on_account:view, money_on_account:record_receipt, or document:view).
+  if (storedPurpose === 'moa_receipt') {
+    return (
+      subjectType === 'matter' &&
+      (permSet.permissions.has('money_on_account:view') ||
+        permSet.permissions.has('money_on_account:record_receipt') ||
+        permSet.permissions.has('document:view'))
+    );
+  }
   return false;
 }
 
@@ -34694,8 +34776,11 @@ export async function uploadEvidenceArtifactRecord(
     const requestedPurpose = (
       input.purpose === undefined ? 'cdd' : input.purpose
     ) as EvidencePurpose;
-    // R843: 'moa_receipt' stays disabled until S1-08 §3; only 'cdd' and 'engagement_signed' are enabled here.
-    if (requestedPurpose !== 'cdd' && requestedPurpose !== 'engagement_signed') {
+    if (
+      requestedPurpose !== 'cdd' &&
+      requestedPurpose !== 'engagement_signed' &&
+      requestedPurpose !== 'moa_receipt'
+    ) {
       return registerServiceFailure(
         'VALIDATION_ERROR',
         `Unsupported evidence purpose "${String(input.purpose)}".`,
@@ -34704,7 +34789,11 @@ export async function uploadEvidenceArtifactRecord(
 
     if (!isPurposePermittedForEvidenceUpload(requestedPurpose, permSet)) {
       const requiredPermLabel =
-        requestedPurpose === 'cdd' ? '"cdd:record"' : '"matter:edit"';
+        requestedPurpose === 'cdd'
+          ? '"cdd:record"'
+          : requestedPurpose === 'moa_receipt'
+            ? '"money_on_account:record_receipt"'
+            : '"matter:edit"';
       return registerServiceFailure(
         'FORBIDDEN',
         `Missing required permission ${requiredPermLabel} to upload ${requestedPurpose} files.`,
@@ -34718,7 +34807,8 @@ export async function uploadEvidenceArtifactRecord(
       );
     }
     if (
-      requestedPurpose === 'engagement_signed' &&
+      (requestedPurpose === 'engagement_signed' ||
+        requestedPurpose === 'moa_receipt') &&
       input.subjectType !== 'matter'
     ) {
       return registerServiceFailure(
@@ -38792,26 +38882,30 @@ export async function getMatterOpeningGateStateRecord(
       teams,
       rbacConfig,
     );
-    const [rawOverrides, rawHroRecords, cddStatus] = await Promise.all([
-      matterRepo.listOpeningGateOverridesForMatter(ctx, matter.id, {
-        activeOnly: true,
-      }),
-      registerRepo.listVisibleRegisterRecords(ctx, actor.id, {
-        includeRestricted: true,
-        registerTypeKey: 'high_risk_opening',
-        matterId: matter.id,
-      }),
-      resolveClientCddStatusReadOnly({
-        ctx,
-        clientIds: [matter.clientId, ...(matter.additionalClientIds ?? [])],
-        matterRiskRatingId: matter.riskRatingId,
-        values: store.values,
-        todayYmd,
-        viewerAccess: gateViewerAccess,
-        tenantCfg,
-        people,
-      }),
-    ]);
+    const [rawOverrides, rawHroRecords, cddStatus, fundsEval] =
+      await Promise.all([
+        matterRepo.listOpeningGateOverridesForMatter(ctx, matter.id, {
+          activeOnly: true,
+        }),
+        registerRepo.listVisibleRegisterRecords(ctx, actor.id, {
+          includeRestricted: true,
+          registerTypeKey: 'high_risk_opening',
+          matterId: matter.id,
+        }),
+        resolveClientCddStatusReadOnly({
+          ctx,
+          clientIds: [matter.clientId, ...(matter.additionalClientIds ?? [])],
+          matterRiskRatingId: matter.riskRatingId,
+          values: store.values,
+          todayYmd,
+          viewerAccess: gateViewerAccess,
+          tenantCfg,
+          people,
+        }),
+        getMoneyOnAccountRepository().withTenantReadTransaction(ctx, async (tx) =>
+          evaluateMatterFundsOnAccountInTx(tx, ctx, matter, { lockRows: false }),
+        ),
+      ]);
 
     const workTypesConfig =
       store.workTypesConfig ??
@@ -38877,7 +38971,8 @@ export async function getMatterOpeningGateStateRecord(
       highRiskRecord: selectedHro,
       highRiskPartnerApprover: partnerApprover,
       requiresHighRiskApproval,
-      fundsOnAccountSatisfied: false,
+      fundsOnAccountSatisfied: fundsEval.fundsOnAccountSatisfied,
+      fundsOnAccountSummary: fundsEval.statusSummary,
     });
 
     const prospectiveStatusId = resolveProspectiveStatusId(store);
@@ -41025,16 +41120,45 @@ async function authorizeCommunicationChaseSubjectAccess(params: {
   readonly chase: CommunicationChaseRecord;
 }): Promise<boolean> {
   const { ctx, actor, people, teams, rbacConfig, permSet, chase } = params;
-  if (
-    chase.entityKind === 'engagement_letter' ||
-    chase.entityKind === 'money_on_account'
-  ) {
+  if (chase.entityKind === 'engagement_letter') {
     if (!permSet.permissions.has('matter:edit')) {
       return false;
     }
     const matter = await getMatterRepository().getMatterById<Matter>(
       ctx,
       chase.matterId ?? chase.entityId,
+      { includeRestricted: true },
+    );
+    return Boolean(
+      matter &&
+        canPersonAccessMatter(matter, actor.id, actor, {
+          allPeople: people,
+          teams,
+          config: { rbac: rbacConfig },
+        }),
+    );
+  }
+  if (chase.entityKind === 'money_on_account') {
+    if (
+      !permSet.permissions.has('money_on_account:request') &&
+      !permSet.permissions.has('matter:edit')
+    ) {
+      return false;
+    }
+    let resolvedMatterId = chase.matterId?.trim() || '';
+    if (!resolvedMatterId && chase.entityId) {
+      const req = await getMoneyOnAccountRepository().getRequestById(
+        ctx,
+        chase.entityId,
+      );
+      resolvedMatterId = req?.matterId ?? '';
+    }
+    if (!resolvedMatterId) {
+      return false;
+    }
+    const matter = await getMatterRepository().getMatterById<Matter>(
+      ctx,
+      resolvedMatterId,
       { includeRestricted: true },
     );
     return Boolean(
@@ -41079,7 +41203,8 @@ export async function stopCommunicationChaseRecord(
       await resolveRegisterActorAndConfig(byId, undefined, options);
     if (
       !permSet.permissions.has('matter:edit') &&
-      !permSet.permissions.has('quote:edit')
+      !permSet.permissions.has('quote:edit') &&
+      !permSet.permissions.has('money_on_account:request')
     ) {
       return registerServiceFailure(
         'FORBIDDEN',
@@ -41187,7 +41312,8 @@ export async function retryCommunicationChaseRecord(
       await resolveRegisterActorAndConfig(byId, undefined, options);
     if (
       !permSet.permissions.has('matter:edit') &&
-      !permSet.permissions.has('quote:edit')
+      !permSet.permissions.has('quote:edit') &&
+      !permSet.permissions.has('money_on_account:request')
     ) {
       return registerServiceFailure(
         'FORBIDDEN',
@@ -42511,6 +42637,169 @@ const QUOTE_CHASE_ADAPTER: CommunicationChaseAdapter<Quote> = {
   },
 };
 
+interface MoneyOnAccountChaseSubject {
+  readonly request: MoneyOnAccountRequestRecord;
+  readonly matter: Matter;
+  readonly outstandingPence: MinorUnits;
+  readonly receivedPence: MinorUnits;
+}
+
+const MONEY_ON_ACCOUNT_CHASE_ADAPTER: CommunicationChaseAdapter<MoneyOnAccountChaseSubject> = {
+  entityKind: 'money_on_account',
+  ruleKey: 'moneyOnAccount',
+  async checkStop({ tx, ctx, chase, store }) {
+    const moaRepo = getMoneyOnAccountRepository();
+    const request = await moaRepo.getRequestByIdInTx(tx, ctx, chase.entityId);
+    if (!request) {
+      return { stop: true, reason: 'entity_missing' };
+    }
+    if (request.status === 'received') {
+      return { stop: true, reason: 'received' };
+    }
+    if (request.status === 'cancelled') {
+      return { stop: true, reason: 'cancelled' };
+    }
+    const matter = await getMatterRepository().getMatterById<Matter>(
+      ctx,
+      request.matterId,
+      { includeRestricted: true },
+    );
+    if (!matter) {
+      return { stop: true, reason: 'entity_missing' };
+    }
+    if (isClosedOrArchivedMatterStatus(matter.matterStatusId, store.values)) {
+      return { stop: true, reason: 'matter_closed' };
+    }
+    const receipts = await moaRepo.listReceiptsForRequestInTx(tx, ctx, request.id);
+    const receivedPence = sumMinorUnits(
+      receipts.filter((r) => !r.reversedAt?.trim()).map((r) => r.amountPence),
+    );
+    const outstandingPence = Math.max(0, request.requestedAmountPence - receivedPence);
+    if (outstandingPence <= 0) {
+      return { stop: true, reason: 'received' };
+    }
+    return {
+      stop: false,
+      subject: { request, matter, outstandingPence, receivedPence },
+    };
+  },
+  async buildEmail({
+    stepIndex,
+    subject: { request, matter, outstandingPence },
+    recipientName,
+    tenantConfig,
+    store,
+  }) {
+    const firmName = store.firm.name || tenantConfig.displayName || 'the firm';
+    const ca = request.bankDetailsSnapshot;
+    const outstandingFormatted = formatMinorUnitsGbp(outstandingPence);
+    const matterRef = matter.matterNumber || matter.id;
+    const isSecond = stepIndex === 2;
+    const subject = isSecond
+      ? `Second reminder: Payment on account (${request.paymentReference}) — ${matter.title}`
+      : `Reminder: Payment on account (${request.paymentReference}) — ${matter.title}`;
+
+    const bankDetailsSummary = [
+      `Account name: ${ca.accountName}`,
+      `Bank: ${ca.bankName}`,
+      `Sort code: ${ca.sortCode}`,
+      `Account number: ${ca.accountNumber}`,
+      ...(ca.iban?.trim() ? [`IBAN: ${ca.iban.trim()}`] : []),
+      ...(ca.bic?.trim() ? [`BIC: ${ca.bic.trim()}`] : []),
+      `Payment reference (required): ${request.paymentReference}`,
+      `Amount outstanding: ${outstandingFormatted}`,
+    ];
+
+    const leadLine = isSecond
+      ? `We are writing again regarding our payment on account request (${request.paymentReference}) for ${matter.title} (${matterRef}). Balance outstanding: ${outstandingFormatted}.`
+      : `This is a friendly reminder regarding our payment on account request (${request.paymentReference}) for ${matter.title} (${matterRef}). Balance outstanding: ${outstandingFormatted}.`;
+
+    const textBody = [
+      `Dear ${recipientName},`,
+      '',
+      leadLine,
+      '',
+      ...bankDetailsSummary,
+      '',
+      'Please quote the exact payment reference shown above so we can allocate your transfer promptly.',
+      '',
+      `Yours faithfully,\n${firmName}`,
+    ].join('\n');
+
+    const bankHtmlList = bankDetailsSummary
+      .map((line) => `<li>${escapeHtmlTextForEmail(line)}</li>`)
+      .join('');
+    const htmlBody = `<p>Dear ${escapeHtmlTextForEmail(recipientName)},</p><p>${escapeHtmlTextForEmail(leadLine)}</p><ul>${bankHtmlList}</ul><p>Please quote the exact payment reference shown above so we can allocate your transfer promptly.</p><p>Yours faithfully,<br/>${escapeHtmlTextForEmail(firmName)}</p>`;
+
+    return {
+      templateKey: isSecond
+        ? 'communication.chase.money_on_account.step2'
+        : 'communication.chase.money_on_account.step1',
+      subject,
+      textBody,
+      htmlBody,
+      recipientName,
+      matterId: matter.id,
+      quoteId: request.quoteId ?? matter.sourceQuoteId ?? null,
+    };
+  },
+  async escalationCandidates({
+    rule,
+    subject: { request, matter, outstandingPence },
+    people,
+    teams,
+    rbacConfig,
+  }) {
+    const owningTeam =
+      (matter.owningTeamId
+        ? teams.find(
+            (t) =>
+              t.active &&
+              (t.id === matter.owningTeamId ||
+                t.orgTeamId === matter.owningTeamId),
+          )
+        : undefined) ??
+      (matter.practiceAreaId
+        ? teams.find(
+            (t) =>
+              t.active && t.practiceAreaIds.includes(matter.practiceAreaId),
+          )
+        : undefined);
+    const orderedPersonIds = [
+      matter.leadFeeEarnerId,
+      matter.responsiblePartnerId,
+      matter.supervisingPartnerId,
+      ...(owningTeam?.leadIds ?? []),
+    ].filter((id): id is string => Boolean(id?.trim()));
+
+    const linkedRecords: Task['linkedRecords'] = [
+      { recordType: 'matter', recordId: matter.id },
+      ...(request.quoteId
+        ? [{ recordType: 'quote' as const, recordId: request.quoteId }]
+        : []),
+    ];
+
+    return {
+      orderedPersonIds,
+      canPersonAccessSubject: (candidate) =>
+        canPersonAccessMatter(matter, candidate.id, candidate, {
+          allPeople: people,
+          teams,
+          config: { rbac: rbacConfig },
+        }),
+      taskTitle: `Follow up outstanding payment on account: ${request.paymentReference} (${matter.matterNumber || matter.id})`,
+      taskDescription: `Payment on account ${request.paymentReference} (${formatMinorUnitsGbp(outstandingPence)} remaining) remains unpaid after ${rule.escalateTaskDays} days. Please contact the client to follow up.`,
+      failureTaskTitle: `Follow up failed money on account chase: ${request.paymentReference}`,
+      failureTaskDescription: `Automated payment on account chasing failed 3 times consecutively for ${request.paymentReference} (${matter.matterNumber || matter.id}). Please review and follow up directly.`,
+      linkedRecords,
+      matterId: matter.id,
+      notificationDetail: 'Money on account chase escalated',
+      auditField: 'Money on account chase escalation task',
+      autoTrigger: 'communication_chase_escalation',
+    };
+  },
+};
+
 export const COMMUNICATION_CHASE_ADAPTERS: ReadonlyMap<
   CommunicationChaseEntityKind,
   CommunicationChaseAdapter<unknown>
@@ -42522,6 +42811,10 @@ export const COMMUNICATION_CHASE_ADAPTERS: ReadonlyMap<
   [
     'quote',
     QUOTE_CHASE_ADAPTER as CommunicationChaseAdapter<unknown>,
+  ],
+  [
+    'money_on_account',
+    MONEY_ON_ACCOUNT_CHASE_ADAPTER as CommunicationChaseAdapter<unknown>,
   ],
 ]);
 
@@ -43381,3 +43674,1654 @@ export async function runScheduledCommunicationChasesJobSweep(options?: {
 }
 
 
+// ==================================================================
+// S1-08: Money on Account Configuration, Requests, Receipts & PMS Matching
+// ==================================================================
+
+export async function resolveEffectiveMoneyOnAccountConfigRecord(
+  ctx: TenantContext,
+  tenantConfig: TenantConfiguration = getActiveTenantConfiguration(),
+): Promise<MoneyOnAccountConfiguration> {
+  const override = await getCatalogueRepository().getModuleConfig<
+    Partial<MoneyOnAccountConfiguration>
+  >(ctx, 'money_on_account');
+  return resolveEffectiveMoneyOnAccountConfig(tenantConfig, override ?? null);
+}
+
+export async function saveMoneyOnAccountConfigRecord(
+  newConfigInput: Partial<MoneyOnAccountConfiguration>,
+  reason: string,
+  byId?: string,
+  options?: {
+    readonly mfaVerified?: boolean;
+    readonly tenantCtx?: TenantContext | null;
+    readonly tenantConfig?: TenantConfiguration;
+  },
+): Promise<
+  { ok: true; config: MoneyOnAccountConfiguration } | RegisterServiceDenialOrError
+> {
+  try {
+    const { ctx, tenantCfg, actor, permSet } =
+      await resolveRegisterActorAndConfig(byId, options?.mfaVerified, options);
+    if (!permSet.permissions.has('admin:access')) {
+      return registerServiceFailure(
+        'FORBIDDEN',
+        'You do not have permission to update Money on Account settings.',
+      );
+    }
+    if (!permSet.mfaVerified) {
+      return registerServiceFailure(
+        'MFA_REQUIRED',
+        'Multi-factor authentication is required to update Money on Account bank details.',
+      );
+    }
+    const cleanReason = reason?.trim() || '';
+    if (!cleanReason) {
+      return registerServiceFailure(
+        'VALIDATION_ERROR',
+        'An audited change reason is required to save Money on Account settings.',
+      );
+    }
+
+    if (newConfigInput.paymentReferencePrefix !== undefined) {
+      const cleanedPrefix = String(newConfigInput.paymentReferencePrefix).trim();
+      if (!/^[A-Za-z0-9]{2,6}$/.test(cleanedPrefix)) {
+        return registerServiceFailure(
+          'MOA_CONFIG_VALIDATION_ERROR',
+          'Payment reference prefix must be 2 to 6 letters or numbers.',
+        );
+      }
+    }
+
+    const catRepo = getCatalogueRepository();
+    const auditRepo = getAuditRepository();
+    const prevOverridePre = await catRepo.getModuleConfig<
+      Partial<MoneyOnAccountConfiguration>
+    >(ctx, 'money_on_account');
+    const prevEffectivePre = resolveEffectiveMoneyOnAccountConfig(
+      tenantCfg,
+      prevOverridePre ?? null,
+    );
+
+    const nextConfig = resolveEffectiveMoneyOnAccountConfig(
+      { moneyOnAccount: prevEffectivePre },
+      newConfigInput,
+    );
+
+    const ca = nextConfig.clientAccount;
+    if (nextConfig.enabled && !areClientBankDetailsConfigured(nextConfig)) {
+      return registerServiceFailure(
+        'MOA_CONFIG_VALIDATION_ERROR',
+        'Account name, bank name, sort code, and account number are required when Money on Account is enabled.',
+      );
+    }
+    if (ca.sortCode?.trim()) {
+      const sortDigits = ca.sortCode.replace(/[^0-9]/g, '');
+      if (sortDigits.length < 6 || sortDigits.length > 10 || ca.sortCode.length > 20) {
+        return registerServiceFailure(
+          'MOA_CONFIG_VALIDATION_ERROR',
+          'Enter a valid UK sort code (for example 12-34-56).',
+        );
+      }
+    }
+    if (ca.accountNumber?.trim()) {
+      const acctDigits = ca.accountNumber.replace(/[^A-Za-z0-9]/g, '');
+      if (acctDigits.length < 6 || acctDigits.length > 12) {
+        return registerServiceFailure(
+          'MOA_CONFIG_VALIDATION_ERROR',
+          'Enter a valid client bank account number.',
+        );
+      }
+    }
+
+    const effectiveEnv =
+      tenantCfg.environment === 'live' || ctx.environment === 'live'
+        ? 'live'
+        : tenantCfg.environment;
+    try {
+      assertMoneyOnAccountSafeForEnvironment(nextConfig, effectiveEnv);
+    } catch (envErr) {
+      const msg = envErr instanceof Error ? envErr.message : '';
+      return registerServiceFailure(
+        'MOA_LIVE_PLACEHOLDER_BANK_DETAILS_FORBIDDEN',
+        msg ||
+          'Demo placeholder client account bank details cannot be used in a live environment.',
+      );
+    }
+
+    const nowIso = new Date().toISOString();
+    const saved = await catRepo.withTenantTransaction(ctx, async (tx) => {
+      const prevInTxOverride = await catRepo.getModuleConfigInTx<
+        Partial<MoneyOnAccountConfiguration>
+      >(tx, ctx, 'money_on_account');
+      const prevInTx = resolveEffectiveMoneyOnAccountConfig(
+        tenantCfg,
+        prevInTxOverride ?? null,
+      );
+      const stored = await catRepo.putModuleConfigInTx<MoneyOnAccountConfiguration>(
+        tx,
+        ctx,
+        'money_on_account',
+        nextConfig,
+        actor.id,
+      );
+      await auditRepo.appendAuditEntriesInTx(tx, ctx, [
+        {
+          recordType: 'money_on_account_config',
+          recordId: 'FIRM-MOA-CONFIG',
+          action: 'update',
+          field: 'Money on account configuration',
+          oldValue: formatMaskedMoaConfigAuditSummary(prevInTx),
+          newValue: formatMaskedMoaConfigAuditSummary(stored),
+          byId: actor.id,
+          at: nowIso,
+          reason: cleanReason,
+        },
+      ]);
+      return stored;
+    });
+
+    return { ok: true, config: saved };
+  } catch (err) {
+    return mapRegisterErrorToDenial(err);
+  }
+}
+
+export async function createAndSendMoneyOnAccountRequestRecord(
+  input: {
+    matterId: string;
+    quoteId?: string | null;
+    requestedAmountPence?: number;
+    recipientEmail?: string;
+    recipientName?: string;
+    notes?: string | null;
+    idempotencyKey?: string;
+  },
+  byId?: string,
+  options?: {
+    readonly tenantCtx?: TenantContext | null;
+    readonly tenantConfig?: TenantConfiguration;
+    readonly pdfConverter?: DocumentPdfConverter;
+    readonly emailSender?: EmailSender;
+    readonly secretReader?: KeyVaultSecretReader;
+    readonly storageProvider?: DocumentStorageProvider;
+  },
+): Promise<
+  | {
+      ok: true;
+      request: MoneyOnAccountRequestRecord;
+      matter: Matter;
+      outboxRecord: EmailOutboxRecord | null;
+      chase: CommunicationChaseRecord | null;
+      emailProviderDisabled: boolean;
+      deduplicated: boolean;
+    }
+  | RegisterServiceDenialOrError
+> {
+  try {
+    const { ctx, tenantCfg, actor, people, teams, rbacConfig, permSet } =
+      await resolveRegisterActorAndConfig(byId, undefined, options);
+    if (!permSet.permissions.has('money_on_account:request')) {
+      return registerServiceFailure(
+        'FORBIDDEN',
+        'You do not have permission to send Money on Account requests.',
+      );
+    }
+
+    const matterIdClean = input.matterId?.trim() || '';
+    if (!matterIdClean) {
+      return registerServiceFailure('VALIDATION_ERROR', 'Matter ID is required.');
+    }
+
+    const matterRepo = getMatterRepository();
+    const matterPre = await matterRepo.getMatterById<Matter>(ctx, matterIdClean, {
+      includeRestricted: true,
+    });
+    if (
+      !matterPre ||
+      !canPersonAccessMatter(matterPre, actor.id, actor, {
+        allPeople: people,
+        teams,
+        config: { rbac: rbacConfig },
+      })
+    ) {
+      return registerServiceFailure(
+        'NOT_FOUND',
+        'Matter was not found or access denied.',
+      );
+    }
+
+    const store = await loadTenantCatalogueStoreView(ctx, {
+      includePmsLinks: false,
+    });
+    if (isClosedOrArchivedMatterStatus(matterPre.matterStatusId, store.values)) {
+      return registerServiceFailure(
+        'VALIDATION_ERROR',
+        'Money on Account requests cannot be sent on closed or archived matters.',
+      );
+    }
+
+    const moaRepo = getMoneyOnAccountRepository();
+    const outboxRepo = getOutboxRepository();
+    const chasingRepo = getChasingRepository();
+    const intakeCheckRepo = getIntakeCheckRepository();
+    const auditRepo = getAuditRepository();
+    const emailProviderDisabled =
+      (resolveEmailIntegrationConfig(tenantCfg).provider ?? 'disabled') ===
+      'disabled';
+    const cleanExplicitKey = input.idempotencyKey?.trim() || '';
+
+    // Lesson 3: Pre-TX idempotency check by key before generating PDFs or opening write locks.
+    if (cleanExplicitKey) {
+      const existingPre = await moaRepo.findRequestByIdempotencyKey(
+        ctx,
+        matterPre.id,
+        cleanExplicitKey,
+      );
+      if (existingPre) {
+        if (existingPre.matterId !== matterPre.id) {
+          return registerServiceFailure(
+            'MOA_REQUEST_IDEMPOTENCY_CONFLICT',
+            'Idempotency key belongs to a different matter.',
+          );
+        }
+        const [existingOutbox, existingChase] = await Promise.all([
+          existingPre.outboxEmailId
+            ? outboxRepo.getOutboxRecordById(ctx, existingPre.outboxEmailId)
+            : Promise.resolve(null),
+          chasingRepo.getActiveChaseForEntity(ctx, {
+            entityKind: 'money_on_account',
+            entityId: existingPre.id,
+          }),
+        ]);
+        return {
+          ok: true,
+          request: existingPre,
+          matter: matterPre,
+          outboxRecord: existingOutbox,
+          chase: existingChase,
+          emailProviderDisabled,
+          deduplicated: true,
+        };
+      }
+    }
+
+    const [effectiveMoa, effectiveChasing] = await Promise.all([
+      resolveEffectiveMoneyOnAccountConfigRecord(ctx, tenantCfg),
+      resolveEffectiveChasingConfig(ctx, tenantCfg),
+    ]);
+    const effectiveEnv =
+      tenantCfg.environment === 'live' || ctx.environment === 'live'
+        ? 'live'
+        : tenantCfg.environment;
+    try {
+      assertBankDetailsSafeForEnvironment(effectiveMoa, effectiveEnv);
+    } catch (cfgErr) {
+      const rawMsg = cfgErr instanceof Error ? cfgErr.message : '';
+      if (rawMsg.startsWith('MOA_LIVE_PLACEHOLDER_BANK_DETAILS_FORBIDDEN')) {
+        return registerServiceFailure(
+          'MOA_LIVE_PLACEHOLDER_BANK_DETAILS_FORBIDDEN',
+          rawMsg,
+        );
+      }
+      return registerServiceFailure(
+        'MOA_NOT_CONFIGURED',
+        rawMsg ||
+          'Client account bank details must be configured before sending Money on Account requests.',
+      );
+    }
+
+    const explicitQuoteId = input.quoteId?.trim() || '';
+    const candidateQuoteId = explicitQuoteId || matterPre.sourceQuoteId || '';
+    const sourceQuote = candidateQuoteId
+      ? await getIntakeQuoteRepository().getQuoteById<Quote>(
+          ctx,
+          candidateQuoteId,
+          { includeRestricted: true },
+        )
+      : null;
+    if (
+      explicitQuoteId &&
+      (!sourceQuote ||
+        (sourceQuote.convertedMatterId !== matterPre.id &&
+          matterPre.sourceQuoteId !== sourceQuote.id))
+    ) {
+      return registerServiceFailure(
+        'NOT_FOUND',
+        'Linked quote was not found for this matter.',
+      );
+    }
+    const resolvedQuoteId = sourceQuote?.id ?? null;
+
+    const agreedAmountPence = resolveMatterAgreedPaymentOnAccountPence({
+      matter: matterPre,
+      sourceQuote,
+    });
+    let resolvedAmountPence: MinorUnits;
+    if (input.requestedAmountPence !== undefined) {
+      if (
+        typeof input.requestedAmountPence !== 'number' ||
+        !Number.isSafeInteger(input.requestedAmountPence) ||
+        input.requestedAmountPence <= 0
+      ) {
+        return registerServiceFailure(
+          'VALIDATION_ERROR',
+          'Requested amount must be a whole number of pence greater than £0.00.',
+        );
+      }
+      resolvedAmountPence = input.requestedAmountPence;
+    } else if (agreedAmountPence !== null && agreedAmountPence > 0) {
+      resolvedAmountPence = agreedAmountPence;
+    } else {
+      return registerServiceFailure(
+        'VALIDATION_ERROR',
+        'Please enter a Payment on Account amount greater than £0.00.',
+      );
+    }
+
+    const partyRepo = getPartyRepository();
+    const [clientPerson, clientOrg, instructingPerson] = await Promise.all([
+      matterPre.clientId.startsWith('P-')
+        ? partyRepo.getPersonById<Person>(ctx, matterPre.clientId)
+        : Promise.resolve(null),
+      matterPre.clientId.startsWith('O-')
+        ? partyRepo.getOrganisationById<Organisation>(ctx, matterPre.clientId)
+        : Promise.resolve(null),
+      matterPre.instructingContactId &&
+      matterPre.instructingContactId !== matterPre.clientId
+        ? partyRepo.getPersonById<Person>(ctx, matterPre.instructingContactId)
+        : Promise.resolve(null),
+    ]);
+    const recipientPerson = instructingPerson ?? clientPerson;
+    const resolvedEmail = (
+      input.recipientEmail?.trim() ||
+      (recipientPerson ? primaryEmail(recipientPerson) : '') ||
+      clientOrg?.generalEmail?.trim() ||
+      ''
+    ).trim();
+    if (!resolvedEmail || !isValidEmailAddress(resolvedEmail)) {
+      return registerServiceFailure(
+        'VALIDATION_ERROR',
+        'A valid client recipient email address is required before sending.',
+      );
+    }
+    const resolvedRecipientName = (
+      input.recipientName?.trim() ||
+      (recipientPerson ? personDisplayName(recipientPerson) : '') ||
+      clientOrg?.legalName ||
+      'Client'
+    ).trim();
+    const clientName =
+      clientOrg?.legalName ||
+      (clientPerson ? personDisplayName(clientPerson) : resolvedRecipientName);
+
+    const feeEarner =
+      people.find(
+        (p) =>
+          p.id === (matterPre.leadFeeEarnerId || matterPre.responsiblePartnerId),
+      ) ?? actor;
+    const firmName = store.firm.name || tenantCfg.displayName || 'Law Firm';
+    const cleanNotes = input.notes?.trim() || null;
+
+    const storage = options?.storageProvider ?? getDocumentStorage(tenantCfg);
+    const paymentProvider = createTenantIntakeCheckProviders({
+      tenantConfig: tenantCfg,
+      repository: intakeCheckRepo,
+      storageProvider: storage,
+    }).payments;
+    if (!paymentProvider.recordCheckInTx) {
+      return registerServiceFailure(
+        'MOA_NOT_CONFIGURED',
+        'Payment request provider does not support transactional recording.',
+      );
+    }
+    const converter =
+      options?.pdfConverter ??
+      selectDocumentPdfConverter(tenantCfg, {
+        converterUrl: process.env.DOC_CONVERTER_URL,
+      });
+
+    let finalOutcome:
+      | {
+          ok: true;
+          request: MoneyOnAccountRequestRecord;
+          matter: Matter;
+          outboxRecord: EmailOutboxRecord | null;
+          chase: CommunicationChaseRecord | null;
+          deduplicated: boolean;
+        }
+      | RegisterServiceDenialOrError
+      | null = null;
+
+    for (let attempt = 0; attempt < 3; attempt += 1) {
+      const existingCount = await moaRepo.withTenantReadTransaction(ctx, (tx) =>
+        moaRepo.countRequestsForMatterInTx(tx, ctx, matterPre.id),
+      );
+      const expectedSeq = existingCount + 1 + attempt;
+      const paymentReference = buildMoneyOnAccountPaymentReference({
+        prefix: effectiveMoa.paymentReferencePrefix,
+        matterNumber: matterPre.matterNumber,
+        matterId: matterPre.id,
+        sequenceNumber: expectedSeq,
+      });
+
+      const matterRefDisplay = matterPre.matterNumber || matterPre.id;
+      const pdfRes = await renderMoneyOnAccountRequestPdfBytes({
+        docxInput: {
+          firmName,
+          contactEmail:
+            tenantCfg.firm?.contactEmail ?? tenantCfg.branding.contactEmail,
+          matterReference: matterRefDisplay,
+          matterTitle: matterPre.title,
+          clientName,
+          recipientName: resolvedRecipientName,
+          feeEarnerName: personDisplayName(feeEarner),
+          paymentReference,
+          requestedAmountPence: resolvedAmountPence,
+          config: effectiveMoa,
+          notes: cleanNotes,
+        },
+        converter,
+        tenantId: ctx.tenantId,
+        correlationId: ctx.correlationId,
+      });
+      if (!pdfRes.ok) {
+        return registerServiceFailure(pdfRes.code, pdfRes.error);
+      }
+
+      const content = renderMoneyOnAccountRequestContent({
+        config: effectiveMoa,
+        paymentReference,
+        matterTitle: matterPre.title,
+        matterReference: matterRefDisplay,
+        requestedAmountPence: resolvedAmountPence,
+        recipientName: resolvedRecipientName,
+        firmName,
+      });
+      const ca = effectiveMoa.clientAccount;
+      const bankSummaryText = [
+        `Account name: ${ca.accountName}`,
+        `Bank: ${ca.bankName}`,
+        `Sort code: ${ca.sortCode}`,
+        `Account number: ${ca.accountNumber}`,
+        ...(ca.iban?.trim() ? [`IBAN: ${ca.iban.trim()}`] : []),
+        ...(ca.bic?.trim() ? [`BIC: ${ca.bic.trim()}`] : []),
+        `Payment reference: ${paymentReference}`,
+        `Amount requested: ${content.requestedAmountFormatted}`,
+      ];
+      const textBody = [
+        `Dear ${resolvedRecipientName},`,
+        '',
+        content.introParagraph,
+        '',
+        ...bankSummaryText,
+        '',
+        content.bankTransferInstruction,
+        '',
+        content.clientMoneyComplianceNote,
+        '',
+        `Yours faithfully,\n${personDisplayName(feeEarner)} — ${firmName}`,
+      ].join('\n');
+      const bankListHtml = bankSummaryText
+        .map((line) => `<li>${escapeHtmlTextForEmail(line)}</li>`)
+        .join('');
+      const htmlBody = [
+        `<p>Dear ${escapeHtmlTextForEmail(resolvedRecipientName)},</p>`,
+        `<p>${escapeHtmlTextForEmail(content.introParagraph)}</p>`,
+        `<ul>${bankListHtml}</ul>`,
+        `<p>${escapeHtmlTextForEmail(content.bankTransferInstruction)}</p>`,
+        `<p>${escapeHtmlTextForEmail(content.clientMoneyComplianceNote)}</p>`,
+        `<p>Yours faithfully,<br/>${escapeHtmlTextForEmail(personDisplayName(feeEarner))} — ${escapeHtmlTextForEmail(firmName)}</p>`,
+      ].join('');
+
+      try {
+        finalOutcome = await moaRepo.withTenantTransaction(ctx, async (tx) => {
+          await tx.query(
+            'SELECT id FROM public.matters WHERE tenant_id = $1 AND id = $2 FOR UPDATE',
+            [ctx.tenantId, matterPre.id],
+          );
+          const lockedMatter = await matterRepo.getMatterById<Matter>(
+            ctx,
+            matterPre.id,
+            { includeRestricted: true },
+          );
+          if (!lockedMatter) {
+            return registerServiceFailure('NOT_FOUND', 'Matter was not found.');
+          }
+          if (
+            isClosedOrArchivedMatterStatus(
+              lockedMatter.matterStatusId,
+              store.values,
+            )
+          ) {
+            return registerServiceFailure(
+              'VALIDATION_ERROR',
+              'Money on Account requests cannot be sent on closed or archived matters.',
+            );
+          }
+
+          if (cleanExplicitKey) {
+            const existingInTx = await moaRepo.findRequestByIdempotencyKeyInTx(
+              tx,
+              ctx,
+              lockedMatter.id,
+              cleanExplicitKey,
+              { forUpdate: true },
+            );
+            if (existingInTx) {
+              if (existingInTx.matterId !== lockedMatter.id) {
+                return registerServiceFailure(
+                  'MOA_REQUEST_IDEMPOTENCY_CONFLICT',
+                  'Idempotency key belongs to a different matter.',
+                );
+              }
+              const [existingOutboxInTx, existingChaseInTx] = await Promise.all(
+                [
+                  existingInTx.outboxEmailId
+                    ? outboxRepo.getOutboxRecordByIdInTx(
+                        tx,
+                        ctx,
+                        existingInTx.outboxEmailId,
+                      )
+                    : Promise.resolve(null),
+                  chasingRepo.getActiveChaseForEntity(ctx, {
+                    entityKind: 'money_on_account',
+                    entityId: existingInTx.id,
+                  }),
+                ],
+              );
+              return {
+                ok: true as const,
+                request: existingInTx,
+                matter: lockedMatter,
+                outboxRecord: existingOutboxInTx,
+                chase: existingChaseInTx,
+                deduplicated: true,
+              };
+            }
+          }
+
+          const currentCount = await moaRepo.countRequestsForMatterInTx(
+            tx,
+            ctx,
+            lockedMatter.id,
+          );
+          const expectedPaymentRef = buildMoneyOnAccountPaymentReference({
+            prefix: effectiveMoa.paymentReferencePrefix,
+            matterNumber: lockedMatter.matterNumber,
+            matterId: lockedMatter.id,
+            sequenceNumber: currentCount + 1,
+          });
+          if (expectedPaymentRef !== paymentReference && attempt < 2) {
+            const retryErr = new Error('MOA_REF_SEQ_RETRY') as Error & {
+              code: string;
+            };
+            retryErr.code = 'MOA_REF_SEQ_RETRY';
+            throw retryErr;
+          }
+
+          const nowIso = nextMonotonicIsoTimestamp(lockedMatter.updatedAt);
+          const requestId = await moaRepo.allocateRequestIdInTx(tx);
+
+          const queued = await outboxRepo.enqueueEmailInTx(tx, ctx, {
+            idempotencyKey: `moa:request:${requestId}`,
+            templateKey: 'money_on_account.request',
+            recipients: { to: [resolvedEmail] },
+            subject: content.subject,
+            htmlBody,
+            textBody,
+            attachments: [
+              {
+                kind: 'inline',
+                fileName: pdfRes.fileName,
+                contentType: 'application/pdf',
+                contentBytes: pdfRes.pdfBytes,
+              },
+            ],
+            matterId: lockedMatter.id,
+            quoteId: resolvedQuoteId,
+            createdByPersonId: actor.id,
+            correlationId: ctx.correlationId,
+          });
+
+          const paymentCheck = await paymentProvider.recordCheckInTx!(tx, ctx, {
+            subjectType: 'matter',
+            subjectId: lockedMatter.id,
+            amountMinorUnits: BigInt(resolvedAmountPence),
+            currency: 'GBP',
+            clientAccountReference: paymentReference,
+            referenceCode: requestId,
+            outcome: 'requested_manual',
+            notes: cleanNotes,
+            evidenceRefs: [],
+          });
+
+          const insertedRequest = await moaRepo.insertRequestInTx(tx, ctx, {
+            id: requestId,
+            matterId: lockedMatter.id,
+            quoteId: resolvedQuoteId,
+            paymentReference,
+            requestedAmountPence: resolvedAmountPence,
+            recipientEmail: resolvedEmail,
+            recipientName: resolvedRecipientName,
+            status: 'requested',
+            requestedAt: nowIso,
+            requestedByPersonId: actor.id,
+            outboxEmailId: queued.record.id,
+            bankDetailsSnapshot: effectiveMoa.clientAccount,
+            intakeCheckRecordId: paymentCheck.id,
+            notes: cleanNotes,
+            idempotencyKey: cleanExplicitKey || null,
+            createdByPersonId: actor.id,
+            createdAt: nowIso,
+          });
+
+          let chaseRecord: CommunicationChaseRecord | null = null;
+          if (effectiveChasing.moneyOnAccount.enabled) {
+            const nextActionIso = addDays(
+              new Date(nowIso),
+              effectiveChasing.moneyOnAccount.firstChaseDays,
+            ).toISOString();
+            const chaseRes = await chasingRepo.startOrReplaceChaseInTx(tx, ctx, {
+              entityKind: 'money_on_account',
+              entityId: insertedRequest.id,
+              matterId: lockedMatter.id,
+              quoteId: resolvedQuoteId,
+              recipientEmail: resolvedEmail,
+              recipientName: resolvedRecipientName,
+              sentAt: nowIso,
+              nextActionAt: nextActionIso,
+              createdByPersonId: actor.id,
+            });
+            chaseRecord = chaseRes.chase;
+          }
+
+          let savedMatter = lockedMatter;
+          const costsSnapshot = (lockedMatter.fieldValues?.['matterCosts'] ??
+            lockedMatter.fieldValues?.['matterCostsSnapshot']) as
+            | { paymentOnAccountRequired?: string }
+            | undefined;
+          const hasExistingRetainer =
+            (typeof lockedMatter.retainerMoniesOnAccountPence === 'number' &&
+              lockedMatter.retainerMoniesOnAccountPence > 0) ||
+            (typeof lockedMatter.retainerMoniesOnAccountGbp === 'number' &&
+              lockedMatter.retainerMoniesOnAccountGbp > 0);
+          if (
+            !hasExistingRetainer &&
+            costsSnapshot?.paymentOnAccountRequired !== 'No'
+          ) {
+            const backfillPence =
+              agreedAmountPence !== null && agreedAmountPence > 0
+                ? agreedAmountPence
+                : resolvedAmountPence;
+            savedMatter = await putMatterWithInTxRestrictions(
+              ctx,
+              {
+                ...lockedMatter,
+                retainerMoniesOnAccountPence: backfillPence,
+                retainerMoniesOnAccountGbp: minorUnitsToPounds(backfillPence),
+                updatedAt: nowIso,
+                updatedById: actor.id,
+              },
+              { expectedRowVersion: null },
+            );
+          }
+
+          await auditRepo.appendAuditEntriesInTx(tx, ctx, [
+            {
+              recordType: 'money_on_account_request',
+              recordId: insertedRequest.id,
+              action: 'create',
+              field: 'Money on account requested',
+              oldValue: 'none',
+              newValue: `matter=${lockedMatter.id} ref=${insertedRequest.paymentReference} amountPence=${insertedRequest.requestedAmountPence} outbox=${queued.record.id}`,
+              byId: actor.id,
+              at: nowIso,
+            },
+          ]);
+
+          return {
+            ok: true as const,
+            request: insertedRequest,
+            matter: savedMatter,
+            outboxRecord: queued.record,
+            chase: chaseRecord,
+            deduplicated: false,
+          };
+        });
+        break;
+      } catch (retryOrDbErr) {
+        const errCode = (retryOrDbErr as { code?: string })?.code;
+        if (errCode === 'MOA_REF_SEQ_RETRY' && attempt < 2) {
+          continue;
+        }
+        throw retryOrDbErr;
+      }
+    }
+
+    if (!finalOutcome) {
+      return registerServiceFailure(
+        'INTERNAL_ERROR',
+        'Unable to allocate a unique Money on Account request reference.',
+      );
+    }
+    if (!finalOutcome.ok) {
+      return finalOutcome;
+    }
+
+    let finalOutbox = finalOutcome.outboxRecord;
+    if (!finalOutcome.deduplicated && !emailProviderDisabled && finalOutbox) {
+      try {
+        await drainEmailOutboxForTenant(ctx, {
+          tenantConfig: tenantCfg,
+          outboxRepository: outboxRepo,
+          emailSender: options?.emailSender,
+          secretReader: options?.secretReader,
+          storageProvider: storage,
+          actorId: actor.id,
+          batchSize: 10,
+        });
+        const refreshed = await outboxRepo.getOutboxRecordById(
+          ctx,
+          finalOutbox.id,
+        );
+        if (refreshed) {
+          finalOutbox = refreshed;
+        }
+      } catch {
+        // Best-effort post-commit drain; outbox row stays pending.
+      }
+    }
+
+    return {
+      ok: true,
+      request: finalOutcome.request,
+      matter: finalOutcome.matter,
+      outboxRecord: finalOutbox,
+      chase: finalOutcome.chase,
+      emailProviderDisabled,
+      deduplicated: finalOutcome.deduplicated,
+    };
+  } catch (err) {
+    return mapRegisterErrorToDenial(err);
+  }
+}
+
+export async function cancelMoneyOnAccountRequestRecord(
+  input: {
+    requestId: string;
+    reason: string;
+  },
+  byId?: string,
+  options?: {
+    readonly tenantCtx?: TenantContext | null;
+    readonly tenantConfig?: TenantConfiguration;
+  },
+): Promise<
+  | {
+      ok: true;
+      request: MoneyOnAccountRequestRecord;
+      stoppedChase: CommunicationChaseRecord | null;
+    }
+  | RegisterServiceDenialOrError
+> {
+  try {
+    const { ctx, tenantCfg, actor, people, teams, rbacConfig, permSet } =
+      await resolveRegisterActorAndConfig(byId, undefined, options);
+    if (!permSet.permissions.has('money_on_account:request')) {
+      return registerServiceFailure(
+        'FORBIDDEN',
+        'You do not have permission to cancel Money on Account requests.',
+      );
+    }
+
+    const requestIdClean = input.requestId?.trim() || '';
+    const cleanReason = input.reason?.trim() || '';
+    if (!requestIdClean) {
+      return registerServiceFailure('VALIDATION_ERROR', 'Request ID is required.');
+    }
+
+    const moaRepo = getMoneyOnAccountRepository();
+    const matterRepo = getMatterRepository();
+    const chasingRepo = getChasingRepository();
+    const auditRepo = getAuditRepository();
+
+    // Lesson 5: Check request + matter access BEFORE state/input branching -> uniform NOT_FOUND.
+    const requestPre = await moaRepo.getRequestById(ctx, requestIdClean);
+    const matterPre = requestPre
+      ? await matterRepo.getMatterById<Matter>(ctx, requestPre.matterId, {
+          includeRestricted: true,
+        })
+      : null;
+    if (
+      !requestPre ||
+      !matterPre ||
+      !canPersonAccessMatter(matterPre, actor.id, actor, {
+        allPeople: people,
+        teams,
+        config: { rbac: rbacConfig },
+      })
+    ) {
+      return registerServiceFailure(
+        'NOT_FOUND',
+        'Money on Account request was not found.',
+      );
+    }
+
+    if (!cleanReason) {
+      return registerServiceFailure(
+        'VALIDATION_ERROR',
+        'A cancellation reason is required.',
+      );
+    }
+
+    const storage = getDocumentStorage(tenantCfg);
+    const paymentProvider = createTenantIntakeCheckProviders({
+      tenantConfig: tenantCfg,
+      repository: getIntakeCheckRepository(),
+      storageProvider: storage,
+    }).payments;
+
+    return await moaRepo.withTenantTransaction(ctx, async (tx) => {
+      await tx.query(
+        'SELECT id FROM public.matters WHERE tenant_id = $1 AND id = $2 FOR UPDATE',
+        [ctx.tenantId, matterPre.id],
+      );
+      const lockedRequest = await moaRepo.getRequestByIdInTx(
+        tx,
+        ctx,
+        requestPre.id,
+        { forUpdate: true },
+      );
+      if (!lockedRequest || lockedRequest.matterId !== matterPre.id) {
+        return registerServiceFailure(
+          'NOT_FOUND',
+          'Money on Account request was not found.',
+        );
+      }
+
+      // Lesson 4: Stored state validation only — never cancel 'received' or already-'cancelled'.
+      if (
+        lockedRequest.status !== 'draft' &&
+        lockedRequest.status !== 'requested' &&
+        lockedRequest.status !== 'part_received'
+      ) {
+        return registerServiceFailure(
+          'VALIDATION_ERROR',
+          `Cannot cancel a Money on Account request in "${lockedRequest.status}" status.`,
+        );
+      }
+
+      const receipts = await moaRepo.listReceiptsForRequestInTx(
+        tx,
+        ctx,
+        lockedRequest.id,
+      );
+      const hasUnreversedReceipts = receipts.some((r) => !r.reversedAt?.trim());
+      if (hasUnreversedReceipts) {
+        return registerServiceFailure(
+          'VALIDATION_ERROR',
+          'Reverse active recorded receipts before cancelling this Money on Account request.',
+        );
+      }
+
+      const nowIso = new Date().toISOString();
+      if (paymentProvider.recordCheckInTx) {
+        await paymentProvider.recordCheckInTx(tx, ctx, {
+          subjectType: 'matter',
+          subjectId: lockedRequest.matterId,
+          amountMinorUnits: BigInt(0),
+          currency: 'GBP',
+          clientAccountReference: lockedRequest.paymentReference,
+          referenceCode: lockedRequest.id,
+          outcome: 'cancelled',
+          notes: cleanReason,
+          evidenceRefs: [],
+        });
+      }
+
+      const updated = await moaRepo.updateRequestInTx(tx, ctx, lockedRequest.id, {
+        status: 'cancelled',
+        cancelledAt: nowIso,
+        cancelledByPersonId: actor.id,
+        cancellationReason: cleanReason,
+        updatedAt: nowIso,
+      });
+
+      // Lesson 2: Immediately stop active money_on_account chase in the SAME TX + audit oldValue.
+      const stoppedChase = await chasingRepo.stopActiveChaseInTx(tx, ctx, {
+        entityKind: 'money_on_account',
+        entityId: updated.id,
+        reason: 'cancelled',
+        stoppedByPersonId: actor.id,
+        stoppedAt: nowIso,
+      });
+
+      const auditEntries: FirmAuditEntryInput[] = [
+        {
+          recordType: 'money_on_account_request',
+          recordId: updated.id,
+          action: 'update',
+          field: 'Money on account request cancelled',
+          oldValue: lockedRequest.status,
+          newValue: `cancelled (ref=${updated.paymentReference})`,
+          byId: actor.id,
+          at: nowIso,
+          reason: cleanReason,
+        },
+      ];
+      if (stoppedChase) {
+        auditEntries.push({
+          recordType: 'communication_chase',
+          recordId: stoppedChase.id,
+          action: 'update',
+          field: 'Communication chase stopped',
+          oldValue: stoppedChase.previousStatus,
+          newValue: `stopped (${stoppedChase.stoppedReason ?? 'cancelled'})`,
+          byId: actor.id,
+          at: nowIso,
+        });
+      }
+      await auditRepo.appendAuditEntriesInTx(tx, ctx, auditEntries);
+
+      return { ok: true as const, request: updated, stoppedChase };
+    });
+  } catch (err) {
+    return mapRegisterErrorToDenial(err);
+  }
+}
+
+export async function recordMoneyOnAccountReceiptRecord(
+  input: {
+    requestId: string;
+    amountPence: number;
+    receivedDate: string;
+    bankReference?: string | null;
+    notes?: string | null;
+    evidenceArtifactId?: string | null;
+  },
+  byId?: string,
+  options?: {
+    readonly tenantCtx?: TenantContext | null;
+    readonly tenantConfig?: TenantConfiguration;
+  },
+): Promise<
+  | {
+      ok: true;
+      receipt: MoneyOnAccountReceiptRecord;
+      request: MoneyOnAccountRequestRecord;
+      stoppedChase: CommunicationChaseRecord | null;
+    }
+  | RegisterServiceDenialOrError
+> {
+  try {
+    const { ctx, tenantCfg, actor, people, teams, rbacConfig, permSet } =
+      await resolveRegisterActorAndConfig(byId, undefined, options);
+    if (!permSet.permissions.has('money_on_account:record_receipt')) {
+      return registerServiceFailure(
+        'FORBIDDEN',
+        'You do not have permission to record Money on Account receipts.',
+      );
+    }
+
+    const requestIdClean = input.requestId?.trim() || '';
+    if (!requestIdClean) {
+      return registerServiceFailure('VALIDATION_ERROR', 'Request ID is required.');
+    }
+
+    const moaRepo = getMoneyOnAccountRepository();
+    const matterRepo = getMatterRepository();
+    const chasingRepo = getChasingRepository();
+    const auditRepo = getAuditRepository();
+    const evidenceRepo = getEvidenceArtifactRepository();
+
+    // Lesson 5: Resolve request + matter access FIRST -> uniform NOT_FOUND.
+    const requestPre = await moaRepo.getRequestById(ctx, requestIdClean);
+    const matterPre = requestPre
+      ? await matterRepo.getMatterById<Matter>(ctx, requestPre.matterId, {
+          includeRestricted: true,
+        })
+      : null;
+    if (
+      !requestPre ||
+      !matterPre ||
+      !canPersonAccessMatter(matterPre, actor.id, actor, {
+        allPeople: people,
+        teams,
+        config: { rbac: rbacConfig },
+      })
+    ) {
+      return registerServiceFailure(
+        'NOT_FOUND',
+        'Money on Account request was not found.',
+      );
+    }
+
+    if (
+      typeof input.amountPence !== 'number' ||
+      !Number.isSafeInteger(input.amountPence) ||
+      input.amountPence <= 0
+    ) {
+      return registerServiceFailure(
+        'VALIDATION_ERROR',
+        'Receipt amount must be a whole number of pence greater than £0.00.',
+      );
+    }
+    const cleanDate = input.receivedDate?.trim() || '';
+    if (!isValidCalendarYmd(cleanDate)) {
+      return registerServiceFailure(
+        'VALIDATION_ERROR',
+        'A valid calendar receipt date (YYYY-MM-DD) is required.',
+      );
+    }
+
+    const cleanArtifactId = input.evidenceArtifactId?.trim() || null;
+    let verifiedEvidenceRefs: IntakeEvidenceArtifactRef[] = [];
+    if (cleanArtifactId) {
+      const artifact = await evidenceRepo.getArtifactById(ctx, cleanArtifactId);
+      if (
+        !artifact ||
+        artifact.subjectType !== 'matter' ||
+        artifact.subjectId !== matterPre.id ||
+        artifact.scanStatus !== 'clean'
+      ) {
+        return registerServiceFailure(
+          'NOT_FOUND',
+          'Evidence file not found or access denied.',
+        );
+      }
+      // Lesson 7 / R817: Stored purpose MUST equal 'moa_receipt'.
+      if (artifact.purpose !== 'moa_receipt') {
+        return registerServiceFailure(
+          'VALIDATION_ERROR',
+          'Attached evidence must be uploaded as a Money on Account receipt document.',
+        );
+      }
+      verifiedEvidenceRefs = [
+        {
+          blobKey: artifact.blobKey,
+          sha256: artifact.sha256,
+          contentType: artifact.contentType,
+          sizeBytes: artifact.byteSize,
+          scanStatus: artifact.scanStatus,
+          fileName: artifact.fileName,
+          uploadedByActorId: artifact.uploadedByPersonId,
+          uploadedAt: artifact.uploadedAt,
+        },
+      ];
+    }
+
+    const storage = getDocumentStorage(tenantCfg);
+    const paymentProvider = createTenantIntakeCheckProviders({
+      tenantConfig: tenantCfg,
+      repository: getIntakeCheckRepository(),
+      storageProvider: storage,
+    }).payments;
+    if (!paymentProvider.recordCheckInTx) {
+      return registerServiceFailure(
+        'MOA_NOT_CONFIGURED',
+        'Payment request provider does not support transactional recording.',
+      );
+    }
+
+    const cleanBankRef = input.bankReference?.trim() || null;
+    const cleanNotes = input.notes?.trim() || null;
+
+    return await moaRepo.withTenantTransaction(ctx, async (tx) => {
+      await tx.query(
+        'SELECT id FROM public.matters WHERE tenant_id = $1 AND id = $2 FOR UPDATE',
+        [ctx.tenantId, matterPre.id],
+      );
+      const lockedRequest = await moaRepo.getRequestByIdInTx(
+        tx,
+        ctx,
+        requestPre.id,
+        { forUpdate: true },
+      );
+      if (!lockedRequest || lockedRequest.matterId !== matterPre.id) {
+        return registerServiceFailure(
+          'NOT_FOUND',
+          'Money on Account request was not found.',
+        );
+      }
+
+      // Lesson 4: Stored state must be 'requested' or 'part_received'.
+      if (
+        lockedRequest.status !== 'requested' &&
+        lockedRequest.status !== 'part_received'
+      ) {
+        return registerServiceFailure(
+          'VALIDATION_ERROR',
+          `Receipts can only be recorded on requested or part-received requests (current status: "${lockedRequest.status}").`,
+        );
+      }
+
+      const nowIso = new Date().toISOString();
+      const receiptId = await moaRepo.allocateReceiptIdInTx(tx);
+
+      const paymentCheck = await paymentProvider.recordCheckInTx!(tx, ctx, {
+        subjectType: 'matter',
+        subjectId: lockedRequest.matterId,
+        amountMinorUnits: BigInt(input.amountPence),
+        currency: 'GBP',
+        clientAccountReference: lockedRequest.paymentReference,
+        referenceCode: receiptId,
+        bankStatementReference: cleanBankRef,
+        notes: cleanNotes,
+        outcome: 'receipt_recorded_manual',
+        evidenceRefs: verifiedEvidenceRefs,
+      });
+
+      const insertedReceipt = await moaRepo.insertReceiptInTx(tx, ctx, {
+        id: receiptId,
+        requestId: lockedRequest.id,
+        matterId: lockedRequest.matterId,
+        source: 'manual',
+        amountPence: input.amountPence,
+        receivedDate: cleanDate,
+        bankReference: cleanBankRef,
+        notes: cleanNotes,
+        intakeCheckRecordId: paymentCheck.id,
+        evidenceArtifactId: cleanArtifactId,
+        recordedByPersonId: actor.id,
+        recordedAt: nowIso,
+      });
+
+      const allReceipts = await moaRepo.listReceiptsForRequestInTx(
+        tx,
+        ctx,
+        lockedRequest.id,
+      );
+      const totalReceivedPence = sumMinorUnits(
+        allReceipts.filter((r) => !r.reversedAt?.trim()).map((r) => r.amountPence),
+      );
+      const nextStatus: MoneyOnAccountRequestStatus =
+        totalReceivedPence >= lockedRequest.requestedAmountPence
+          ? 'received'
+          : 'part_received';
+
+      const updatedRequest = await moaRepo.updateRequestInTx(
+        tx,
+        ctx,
+        lockedRequest.id,
+        {
+          status: nextStatus,
+          updatedAt: nowIso,
+        },
+      );
+
+      let stoppedChase: StoppedCommunicationChaseRecord | null = null;
+      const auditEntries: FirmAuditEntryInput[] = [
+        {
+          recordType: 'money_on_account_receipt',
+          recordId: insertedReceipt.id,
+          action: 'create',
+          field: 'Money on account receipt recorded',
+          oldValue: lockedRequest.status,
+          newValue: `request=${updatedRequest.id} source=manual amountPence=${insertedReceipt.amountPence} status=${nextStatus}`,
+          byId: actor.id,
+          at: nowIso,
+        },
+      ];
+
+      if (nextStatus === 'received') {
+        stoppedChase = await chasingRepo.stopActiveChaseInTx(tx, ctx, {
+          entityKind: 'money_on_account',
+          entityId: updatedRequest.id,
+          reason: 'received',
+          stoppedByPersonId: actor.id,
+          stoppedAt: nowIso,
+        });
+        if (stoppedChase) {
+          auditEntries.push({
+            recordType: 'communication_chase',
+            recordId: stoppedChase.id,
+            action: 'update',
+            field: 'Communication chase stopped',
+            oldValue: stoppedChase.previousStatus,
+            newValue: `stopped (${stoppedChase.stoppedReason ?? 'received'})`,
+            byId: actor.id,
+            at: nowIso,
+          });
+        }
+      }
+
+      await auditRepo.appendAuditEntriesInTx(tx, ctx, auditEntries);
+
+      return {
+        ok: true as const,
+        receipt: insertedReceipt,
+        request: updatedRequest,
+        stoppedChase,
+      };
+    });
+  } catch (err) {
+    return mapRegisterErrorToDenial(err);
+  }
+}
+
+export async function matchPmsClientLedgerReceiptRecord(
+  input: {
+    requestId: string;
+    pmsTransactionId: string;
+    notes?: string | null;
+  },
+  byId?: string,
+  options?: {
+    readonly tenantCtx?: TenantContext | null;
+    readonly tenantConfig?: TenantConfiguration;
+  },
+): Promise<
+  | {
+      ok: true;
+      receipt: MoneyOnAccountReceiptRecord;
+      request: MoneyOnAccountRequestRecord;
+      stoppedChase: CommunicationChaseRecord | null;
+    }
+  | RegisterServiceDenialOrError
+> {
+  try {
+    const { ctx, tenantCfg, actor, people, teams, rbacConfig, permSet } =
+      await resolveRegisterActorAndConfig(byId, undefined, options);
+    if (
+      !permSet.permissions.has('money_on_account:record_receipt') ||
+      !permSet.permissions.has('finance:view_matter')
+    ) {
+      return registerServiceFailure(
+        'FORBIDDEN',
+        'You do not have permission to match PMS client ledger receipts.',
+      );
+    }
+
+    const requestIdClean = input.requestId?.trim() || '';
+    const txIdClean = input.pmsTransactionId?.trim() || '';
+    if (!requestIdClean || !txIdClean) {
+      return registerServiceFailure(
+        'VALIDATION_ERROR',
+        'Request ID and PMS transaction ID are required.',
+      );
+    }
+
+    const moaRepo = getMoneyOnAccountRepository();
+    const matterRepo = getMatterRepository();
+    const pmsRepo = getPmsRepository();
+    const chasingRepo = getChasingRepository();
+    const auditRepo = getAuditRepository();
+
+    // Lesson 5: Check request + matter access BEFORE ANY PMS ledger lookup!
+    const requestPre = await moaRepo.getRequestById(ctx, requestIdClean);
+    const matterPre = requestPre
+      ? await matterRepo.getMatterById<Matter>(ctx, requestPre.matterId, {
+          includeRestricted: true,
+        })
+      : null;
+    if (
+      !requestPre ||
+      !matterPre ||
+      !canPersonAccessMatter(matterPre, actor.id, actor, {
+        allPeople: people,
+        teams,
+        config: { rbac: rbacConfig },
+      })
+    ) {
+      return registerServiceFailure(
+        'NOT_FOUND',
+        'Money on Account request was not found.',
+      );
+    }
+
+    const storage = getDocumentStorage(tenantCfg);
+    const paymentProvider = createTenantIntakeCheckProviders({
+      tenantConfig: tenantCfg,
+      repository: getIntakeCheckRepository(),
+      storageProvider: storage,
+    }).payments;
+    if (!paymentProvider.recordCheckInTx) {
+      return registerServiceFailure(
+        'MOA_NOT_CONFIGURED',
+        'Payment request provider does not support transactional recording.',
+      );
+    }
+    const cleanNotes = input.notes?.trim() || null;
+
+    return await moaRepo.withTenantTransaction(ctx, async (tx) => {
+      await tx.query(
+        'SELECT id FROM public.matters WHERE tenant_id = $1 AND id = $2 FOR UPDATE',
+        [ctx.tenantId, matterPre.id],
+      );
+      const lockedRequest = await moaRepo.getRequestByIdInTx(
+        tx,
+        ctx,
+        requestPre.id,
+        { forUpdate: true },
+      );
+      if (!lockedRequest || lockedRequest.matterId !== matterPre.id) {
+        return registerServiceFailure(
+          'NOT_FOUND',
+          'Money on Account request was not found.',
+        );
+      }
+
+      if (
+        lockedRequest.status !== 'requested' &&
+        lockedRequest.status !== 'part_received'
+      ) {
+        return registerServiceFailure(
+          'VALIDATION_ERROR',
+          `PMS receipts can only be matched to requested or part-received requests (current status: "${lockedRequest.status}").`,
+        );
+      }
+
+      const pmsMatterCode = await pmsRepo.getMatterPmsCodeInTx(
+        tx,
+        ctx,
+        matterPre.id,
+      );
+      if (!pmsMatterCode) {
+        return registerServiceFailure(
+          'VALIDATION_ERROR',
+          'This matter is not linked to a PMS matter code.',
+        );
+      }
+
+      const pmsEntry = await pmsRepo.getClientLedgerEntryByTransactionIdInTx(
+        tx,
+        ctx,
+        txIdClean,
+        { forShare: true },
+      );
+      if (!pmsEntry || pmsEntry.matter_code !== pmsMatterCode) {
+        return registerServiceFailure(
+          'NOT_FOUND',
+          'Matching PMS client ledger entry was not found for this matter.',
+        );
+      }
+
+      const pmsAmountPence =
+        typeof pmsEntry.amount_pence === 'number' &&
+        Number.isSafeInteger(pmsEntry.amount_pence)
+          ? pmsEntry.amount_pence
+          : Math.round(pmsEntry.amount * 100);
+      if (pmsEntry.type !== 'Receipt' || pmsAmountPence <= 0) {
+        return registerServiceFailure(
+          'VALIDATION_ERROR',
+          'Only positive client account Receipt entries can be matched as Money on Account receipts.',
+        );
+      }
+
+      const nowIso = new Date().toISOString();
+      const receiptId = await moaRepo.allocateReceiptIdInTx(tx);
+      const receivedDate = isValidCalendarYmd(pmsEntry.date)
+        ? pmsEntry.date
+        : nowIso.slice(0, 10);
+
+      const paymentCheck = await paymentProvider.recordCheckInTx!(tx, ctx, {
+        subjectType: 'matter',
+        subjectId: lockedRequest.matterId,
+        amountMinorUnits: BigInt(pmsAmountPence),
+        currency: 'GBP',
+        clientAccountReference: lockedRequest.paymentReference,
+        referenceCode: receiptId,
+        bankStatementReference: pmsEntry.transaction_id,
+        notes: cleanNotes,
+        outcome: 'receipt_recorded_manual',
+        evidenceRefs: [],
+      });
+
+      const insertedReceipt = await moaRepo.insertReceiptInTx(tx, ctx, {
+        id: receiptId,
+        requestId: lockedRequest.id,
+        matterId: lockedRequest.matterId,
+        source: 'pms_ledger',
+        amountPence: pmsAmountPence,
+        receivedDate,
+        bankReference: pmsEntry.transaction_id,
+        notes: cleanNotes,
+        pmsTransactionId: pmsEntry.transaction_id,
+        pmsMatterCode,
+        intakeCheckRecordId: paymentCheck.id,
+        recordedByPersonId: actor.id,
+        recordedAt: nowIso,
+      });
+
+      const allReceipts = await moaRepo.listReceiptsForRequestInTx(
+        tx,
+        ctx,
+        lockedRequest.id,
+      );
+      const totalReceivedPence = sumMinorUnits(
+        allReceipts.filter((r) => !r.reversedAt?.trim()).map((r) => r.amountPence),
+      );
+      const nextStatus: MoneyOnAccountRequestStatus =
+        totalReceivedPence >= lockedRequest.requestedAmountPence
+          ? 'received'
+          : 'part_received';
+
+      const updatedRequest = await moaRepo.updateRequestInTx(
+        tx,
+        ctx,
+        lockedRequest.id,
+        {
+          status: nextStatus,
+          updatedAt: nowIso,
+        },
+      );
+
+      let stoppedChase: StoppedCommunicationChaseRecord | null = null;
+      const auditEntries: FirmAuditEntryInput[] = [
+        {
+          recordType: 'money_on_account_receipt',
+          recordId: insertedReceipt.id,
+          action: 'create',
+          field: 'Money on account receipt matched to PMS ledger',
+          oldValue: lockedRequest.status,
+          newValue: `request=${updatedRequest.id} source=pms_ledger pmsTx=${pmsEntry.transaction_id} amountPence=${insertedReceipt.amountPence} status=${nextStatus}`,
+          byId: actor.id,
+          at: nowIso,
+        },
+      ];
+
+      if (nextStatus === 'received') {
+        stoppedChase = await chasingRepo.stopActiveChaseInTx(tx, ctx, {
+          entityKind: 'money_on_account',
+          entityId: updatedRequest.id,
+          reason: 'received',
+          stoppedByPersonId: actor.id,
+          stoppedAt: nowIso,
+        });
+        if (stoppedChase) {
+          auditEntries.push({
+            recordType: 'communication_chase',
+            recordId: stoppedChase.id,
+            action: 'update',
+            field: 'Communication chase stopped',
+            oldValue: stoppedChase.previousStatus,
+            newValue: `stopped (${stoppedChase.stoppedReason ?? 'received'})`,
+            byId: actor.id,
+            at: nowIso,
+          });
+        }
+      }
+
+      await auditRepo.appendAuditEntriesInTx(tx, ctx, auditEntries);
+
+      return {
+        ok: true as const,
+        receipt: insertedReceipt,
+        request: updatedRequest,
+        stoppedChase,
+      };
+    });
+  } catch (err) {
+    return mapRegisterErrorToDenial(err);
+  }
+}
+
+export async function reverseMoneyOnAccountReceiptRecord(
+  input: {
+    receiptId: string;
+    reason: string;
+  },
+  byId?: string,
+  options?: {
+    readonly tenantCtx?: TenantContext | null;
+    readonly tenantConfig?: TenantConfiguration;
+  },
+): Promise<
+  | {
+      ok: true;
+      receipt: MoneyOnAccountReceiptRecord;
+      request: MoneyOnAccountRequestRecord;
+    }
+  | RegisterServiceDenialOrError
+> {
+  try {
+    const { ctx, actor, people, teams, rbacConfig, permSet } =
+      await resolveRegisterActorAndConfig(byId, undefined, options);
+    if (!permSet.permissions.has('money_on_account:record_receipt')) {
+      return registerServiceFailure(
+        'FORBIDDEN',
+        'You do not have permission to reverse Money on Account receipts.',
+      );
+    }
+
+    const receiptIdClean = input.receiptId?.trim() || '';
+    const cleanReason = input.reason?.trim() || '';
+    if (!receiptIdClean) {
+      return registerServiceFailure('VALIDATION_ERROR', 'Receipt ID is required.');
+    }
+
+    const moaRepo = getMoneyOnAccountRepository();
+    const matterRepo = getMatterRepository();
+    const auditRepo = getAuditRepository();
+
+    // Lesson 5: Check receipt + request + matter access FIRST -> uniform NOT_FOUND.
+    const receiptPre = await moaRepo.getReceiptById(ctx, receiptIdClean);
+    const requestPre = receiptPre
+      ? await moaRepo.getRequestById(ctx, receiptPre.requestId)
+      : null;
+    const matterPre = receiptPre
+      ? await matterRepo.getMatterById<Matter>(ctx, receiptPre.matterId, {
+          includeRestricted: true,
+        })
+      : null;
+    if (
+      !receiptPre ||
+      !requestPre ||
+      !matterPre ||
+      !canPersonAccessMatter(matterPre, actor.id, actor, {
+        allPeople: people,
+        teams,
+        config: { rbac: rbacConfig },
+      })
+    ) {
+      return registerServiceFailure(
+        'NOT_FOUND',
+        'Money on Account receipt was not found.',
+      );
+    }
+
+    if (!cleanReason) {
+      return registerServiceFailure(
+        'VALIDATION_ERROR',
+        'A reversal reason is required.',
+      );
+    }
+
+    return await moaRepo.withTenantTransaction(ctx, async (tx) => {
+      await tx.query(
+        'SELECT id FROM public.matters WHERE tenant_id = $1 AND id = $2 FOR UPDATE',
+        [ctx.tenantId, matterPre.id],
+      );
+      const lockedRequest = await moaRepo.getRequestByIdInTx(
+        tx,
+        ctx,
+        requestPre.id,
+        { forUpdate: true },
+      );
+      if (!lockedRequest || lockedRequest.matterId !== matterPre.id) {
+        return registerServiceFailure(
+          'NOT_FOUND',
+          'Money on Account request was not found.',
+        );
+      }
+
+      const currentReceipt = await moaRepo.getReceiptByIdInTx(
+        tx,
+        ctx,
+        receiptPre.id,
+      );
+      if (!currentReceipt) {
+        return registerServiceFailure(
+          'NOT_FOUND',
+          'Money on Account receipt was not found.',
+        );
+      }
+      if (currentReceipt.reversedAt?.trim()) {
+        return registerServiceFailure(
+          'VALIDATION_ERROR',
+          'This Money on Account receipt has already been reversed.',
+        );
+      }
+
+      const nowIso = new Date().toISOString();
+      const reversedReceipt = await moaRepo.reverseReceiptInTx(tx, ctx, {
+        receiptId: currentReceipt.id,
+        reversedAt: nowIso,
+        reversedByPersonId: actor.id,
+        reversalReason: cleanReason,
+      });
+
+      const allReceipts = await moaRepo.listReceiptsForRequestInTx(
+        tx,
+        ctx,
+        lockedRequest.id,
+      );
+      const remainingReceivedPence = sumMinorUnits(
+        allReceipts.filter((r) => !r.reversedAt?.trim()).map((r) => r.amountPence),
+      );
+
+      let nextStatus: MoneyOnAccountRequestStatus = lockedRequest.status;
+      if (lockedRequest.status !== 'cancelled' && lockedRequest.status !== 'draft') {
+        nextStatus =
+          remainingReceivedPence >= lockedRequest.requestedAmountPence
+            ? 'received'
+            : remainingReceivedPence > 0
+              ? 'part_received'
+              : 'requested';
+      }
+
+      const updatedRequest = await moaRepo.updateRequestInTx(
+        tx,
+        ctx,
+        lockedRequest.id,
+        {
+          status: nextStatus,
+          updatedAt: nowIso,
+        },
+      );
+
+      await auditRepo.appendAuditEntriesInTx(tx, ctx, [
+        {
+          recordType: 'money_on_account_receipt',
+          recordId: reversedReceipt.id,
+          action: 'update',
+          field: 'Money on account receipt reversed',
+          oldValue: lockedRequest.status,
+          newValue: `request=${updatedRequest.id} reversedAmountPence=${reversedReceipt.amountPence} status=${nextStatus}`,
+          byId: actor.id,
+          at: nowIso,
+          reason: cleanReason,
+        },
+      ]);
+
+      return {
+        ok: true as const,
+        receipt: reversedReceipt,
+        request: updatedRequest,
+      };
+    });
+  } catch (err) {
+    return mapRegisterErrorToDenial(err);
+  }
+}

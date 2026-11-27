@@ -42,6 +42,7 @@ import * as servicesModule from '@/server/services';
 import {
   approveSignOff,
   completeClientCddRecord,
+  createAndSendMoneyOnAccountRequestRecord,
   createRecordFromPms,
   createRegisterRecordService,
   discussSignOff,
@@ -50,6 +51,7 @@ import {
   openProspectiveMatterRecord,
   overrideMatterOpeningPreconditionRecord,
   recordCddChecklistItemRecord,
+  recordMoneyOnAccountReceiptRecord,
   resetAllDemoData,
   saveMatterRecord,
   signOffMatterCostsRecord,
@@ -693,6 +695,16 @@ describe('S1-05 (ADRs 0039 & 0040): High-risk opening sign-off, transactional wo
           ),
         ).toBe(true);
 
+        const litFundsOverride = (await getDynamicAction(
+          'overrideMatterOpeningPreconditionAction',
+        )!({
+          matterId: litigationMatterId,
+          preconditionKey: 'funds_on_account',
+          reason:
+            'Pro bono litigation matter: partner waives money on account precondition.',
+        })) as { ok: boolean };
+        expect(litFundsOverride.ok).toBe(true);
+
         const litOpened = (await openProspectiveAction!(litigationMatterId)) as {
           ok: boolean;
           matter?: Matter;
@@ -804,6 +816,26 @@ describe('S1-05 (ADRs 0039 & 0040): High-risk opening sign-off, transactional wo
           evidenceArtifactId: mSignedCopy.artifact.id,
           status: 'Signed & returned',
         });
+        const moaReq = await createAndSendMoneyOnAccountRequestRecord(
+          {
+            matterId: mId,
+            requestedAmountPence: 50_000,
+            recipientEmail: 'accounts@example.test',
+            recipientName: 'Client Contact',
+          },
+          'P-000001',
+        );
+        if (!moaReq.ok) throw new Error(moaReq.message);
+        const moaRcpt = await recordMoneyOnAccountReceiptRecord(
+          {
+            requestId: moaReq.request.id,
+            amountPence: 50_000,
+            receivedDate: '2026-11-26',
+            bankReference: 'S105-TEST3-PAID',
+          },
+          'P-000001',
+        );
+        if (!moaRcpt.ok) throw new Error(moaRcpt.message);
         const openNow = (await getDynamicAction('openProspectiveMatterAction')!(mId)) as {
           ok: boolean;
           matter?: Matter;
@@ -1923,6 +1955,27 @@ describe('S1-05 (ADRs 0039 & 0040): High-risk opening sign-off, transactional wo
         expect(jointSave.matter).not.toBeNull();
         expect(jointSave.matter!.matterStatusId).toBe('matter_status.prospective_enquiry');
         const jointId = jointSave.matter!.id;
+
+        const jointMoaReq = await createAndSendMoneyOnAccountRequestRecord(
+          {
+            matterId: jointId,
+            requestedAmountPence: 50_000,
+            recipientEmail: 'accounts@example.test',
+            recipientName: 'Joint Client Contact',
+          },
+          'P-000001',
+        );
+        if (!jointMoaReq.ok) throw new Error(jointMoaReq.message);
+        const jointMoaRcpt = await recordMoneyOnAccountReceiptRecord(
+          {
+            requestId: jointMoaReq.request.id,
+            amountPence: 50_000,
+            receivedDate: '2026-11-26',
+            bankReference: 'S105-TEST9-PAID',
+          },
+          'P-000001',
+        );
+        if (!jointMoaRcpt.ok) throw new Error(jointMoaRcpt.message);
 
         const openMissing = (await openAction(jointId)) as { ok: boolean; message?: string };
         expect(openMissing.ok).toBe(false);

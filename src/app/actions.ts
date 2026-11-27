@@ -15,6 +15,7 @@ import {
   type IdentityVerificationOutcome,
   type IntakeEvidenceArtifactRef,
   type MatterNumberingConfig,
+  type MoneyOnAccountConfiguration,
   type NotificationChannelFrequency,
   type NotificationKind,
   type RegisterChecklistItemStatus,
@@ -172,6 +173,12 @@ import {
   listClientPriorMattersRecord,
   listOutboxMessagesForAdminRecord,
   loadPmsLinksAdminDataRecord,
+  cancelMoneyOnAccountRequestRecord,
+  createAndSendMoneyOnAccountRequestRecord,
+  matchPmsClientLedgerReceiptRecord,
+  recordMoneyOnAccountReceiptRecord,
+  reverseMoneyOnAccountReceiptRecord,
+  saveMoneyOnAccountConfigRecord,
   listMatterRateOverridesRecord,
   saveChasingConfigRecord,
   saveEngagementConfigRecord,
@@ -2481,6 +2488,113 @@ export async function getOutboxMessageForAdminAction(input: { outboxId: string }
       mfaVerified: actor.mfaVerified,
       tenantCtx: actor.tenantContext,
     });
+    return res;
+  });
+}
+
+export async function createAndSendMoneyOnAccountRequestAction(input: {
+  matterId: string;
+  quoteId?: string | null;
+  requestedAmountPence?: number;
+  recipientEmail?: string;
+  recipientName?: string;
+  notes?: string | null;
+  idempotencyKey?: string;
+}) {
+  return guardedAction(
+    'createAndSendMoneyOnAccountRequestAction',
+    async (actor) => {
+      const res = await createAndSendMoneyOnAccountRequestRecord(
+        input,
+        actor.personId,
+        { tenantCtx: actor.tenantContext },
+      );
+      revalidateAll();
+      return res;
+    },
+  );
+}
+
+export async function cancelMoneyOnAccountRequestAction(input: {
+  requestId: string;
+  reason: string;
+}) {
+  return guardedAction('cancelMoneyOnAccountRequestAction', async (actor) => {
+    const res = await cancelMoneyOnAccountRequestRecord(
+      input,
+      actor.personId,
+      { tenantCtx: actor.tenantContext },
+    );
+    revalidateAll();
+    return res;
+  });
+}
+
+export async function recordMoneyOnAccountReceiptAction(input: {
+  requestId: string;
+  amountPence: number;
+  receivedDate: string;
+  bankReference?: string | null;
+  notes?: string | null;
+  evidenceArtifactId?: string | null;
+}) {
+  return guardedAction('recordMoneyOnAccountReceiptAction', async (actor) => {
+    const res = await recordMoneyOnAccountReceiptRecord(
+      input,
+      actor.personId,
+      { tenantCtx: actor.tenantContext },
+    );
+    revalidateAll();
+    return res;
+  });
+}
+
+export async function matchPmsClientLedgerReceiptAction(input: {
+  requestId: string;
+  pmsTransactionId: string;
+  notes?: string | null;
+}) {
+  return guardedAction('matchPmsClientLedgerReceiptAction', async (actor) => {
+    const res = await matchPmsClientLedgerReceiptRecord(
+      input,
+      actor.personId,
+      { tenantCtx: actor.tenantContext },
+    );
+    revalidateAll();
+    return res;
+  });
+}
+
+export async function reverseMoneyOnAccountReceiptAction(input: {
+  receiptId: string;
+  reason: string;
+}) {
+  return guardedAction('reverseMoneyOnAccountReceiptAction', async (actor) => {
+    const res = await reverseMoneyOnAccountReceiptRecord(
+      input,
+      actor.personId,
+      { tenantCtx: actor.tenantContext },
+    );
+    revalidateAll();
+    return res;
+  });
+}
+
+export async function saveMoneyOnAccountConfigAction(
+  newConfig: Partial<MoneyOnAccountConfiguration>,
+  reason: string,
+) {
+  return guardedAction('saveMoneyOnAccountConfigAction', async (actor) => {
+    const res = await saveMoneyOnAccountConfigRecord(
+      newConfig,
+      reason,
+      actor.personId,
+      {
+        mfaVerified: actor.mfaVerified,
+        tenantCtx: actor.tenantContext,
+      },
+    );
+    revalidateAll();
     return res;
   });
 }

@@ -223,6 +223,7 @@ export interface EvaluateOpeningPreconditionsInput {
   } | null;
   readonly requiresHighRiskApproval: boolean;
   readonly fundsOnAccountSatisfied?: boolean;
+  readonly fundsOnAccountSummary?: string | null;
 }
 
 export function evaluateOpeningPreconditions(
@@ -237,6 +238,7 @@ export function evaluateOpeningPreconditions(
     highRiskPartnerApprover,
     requiresHighRiskApproval,
     fundsOnAccountSatisfied = false,
+    fundsOnAccountSummary = null,
   } = params;
 
   const activeByKey = new Map<OpeningGatePreconditionKey, OpeningGateOverrideSummary>();
@@ -414,10 +416,10 @@ export function evaluateOpeningPreconditions(
     canOverride: !fundsRawSatisfied,
     nonOverridableReason: null,
     statusSummary: fundsRawSatisfied
-      ? 'Funds received'
+      ? (fundsOnAccountSummary?.trim() || 'Cleared funds received')
       : fundsOverride
         ? 'Awaiting funds (overridden by partner)'
-        : 'Not yet required / awaiting cleared funds',
+        : (fundsOnAccountSummary?.trim() || 'Not yet required / awaiting cleared funds'),
     activeOverride: fundsOverride,
   };
 
