@@ -5,6 +5,7 @@ import Link from 'next/link';
 import { useRouter } from 'next/navigation';
 import { Building2, Link2, Plus, RefreshCw, Search, Trash2, User, X } from 'lucide-react';
 import {
+  poundsToMinorUnits,
   resolveEffectiveFeeCaps,
   type FeeArrangementCapEntry,
   type ResolvedApplicableRatesResult,
@@ -36,6 +37,7 @@ import {
 import {
   DEFAULT_WORK_TYPES_CONFIG,
   resolveWorkTypeFeeArrangementSettings,
+  resolveWorkTypePriceTransparency,
 } from '@/domain/workTypeConfig';
 import { shouldShowNoMatchesMessage } from '@/domain/intakePreviewState';
 import type {
@@ -56,6 +58,7 @@ import type {
   QuoteFeeBasis,
 } from '@/domain/types';
 import { InfoPopover } from './InfoPopover';
+import { createSendIdempotencyController } from './sendIdempotency';
 import { StatusPill } from './SearchBox';
 import { useToast } from './Toast';
 import { useEntityPicker } from './useEntityPicker';
@@ -78,6 +81,7 @@ interface Props {
   tenantVatRatePercent?: number;
   workTypesConfig?: WorkTypesConfiguration;
   firmFeeArrangementCaps?: FeeArrangementCapEntry[];
+  emailProviderDisabled?: boolean;
   onCancelOverride?: () => void;
   onSuccessOverride?: (quote: Quote) => void;
 }
@@ -110,6 +114,7 @@ export function QuoteFormClient({
   tenantVatRatePercent = 20,
   workTypesConfig,
   firmFeeArrangementCaps,
+  emailProviderDisabled = false,
   onCancelOverride,
   onSuccessOverride,
 }: Props) {
@@ -467,6 +472,53 @@ export function QuoteFormClient({
     () => String(existing?.followUpAfterDays ?? 7),
   );
   const [revisionNote, setRevisionNote] = useState('');
+  const [paymentOnAccountRequired, setPaymentOnAccountRequired] = useState<boolean>(
+    () => Boolean(existing?.paymentOnAccountRequired),
+  );
+  const [paymentOnAccountGbpStr, setPaymentOnAccountGbpStr] = useState<string>(() => {
+    if (existing?.paymentOnAccountGbp != null) return String(existing.paymentOnAccountGbp);
+    if (existing?.paymentOnAccountPence != null) return String(existing.paymentOnAccountPence / 100);
+    return '';
+  });
+  const [priceTransparencyCustomNote, setPriceTransparencyCustomNote] = useState<string>(
+    () => existing?.priceTransparencySnapshot?.customNote ?? '',
+  );
+
+  const resolvedPriceTransparency = useMemo(
+    () =>
+      resolveWorkTypePriceTransparency(
+        workTypesConfig ?? DEFAULT_WORK_TYPES_CONFIG,
+        {
+          practiceAreaId,
+          workTypeSubcategoryId: workTypeSubcategoryId || null,
+        },
+      ),
+    [workTypesConfig, practiceAreaId, workTypeSubcategoryId],
+  );
+
+  const quoteSendControllerRef = useRef<ReturnType<
+    typeof createSendIdempotencyController
+  > | null>(null);
+  const getQuoteSendController = () => {
+    if (!quoteSendControllerRef.current) {
+      quoteSendControllerRef.current = createSendIdempotencyController();
+    }
+    return quoteSendControllerRef.current;
+  };
+  useEffect(() => {
+    quoteSendControllerRef.current?.reset();
+  }, [
+    existing?.id,
+    existing?.version,
+    practiceAreaId,
+    workTypeSubcategoryId,
+    feeAmountStr,
+    paymentOnAccountRequired,
+    paymentOnAccountGbpStr,
+    prospectEmail,
+    linkedPersonId,
+    linkedOrganisationId,
+  ]);
 
   const feeEarners = useMemo(
     () =>
@@ -845,12 +897,45 @@ export function QuoteFormClient({
     setDisbursements((prev) => prev.filter((_, i) => i !== idx));
   };
 
-  const handleSubmit = (markAsSent: boolean) => {
+  const handleSubmit = (
+    markAsSent: boolean,
+    sendMode: 'email' | 'offline' = 'email',
+  ) => {
     const combinedProspectName = [firstName.trim(), surname.trim()].filter(Boolean).join(' ');
     const resolvedClientType: 'existing' | 'prospect' =
       linkedOrganisationId || linkedPersonId ? 'existing' : 'prospect';
 
-    startTransition(async () => {
+    let paymentOnAccountPence: number | null = null;
+    let paymentOnAccountGbp: number | null = null;
+    if (paymentOnAccountRequired) {
+      const cleanPoa = paymentOnAccountGbpStr.trim();
+      const poaNum = Number(cleanPoa);
+      if (!cleanPoa || !Number.isFinite(poaNum) || poaNum <= 0) {
+        showToast('Please enter a Payment on Account amount greater than £0.00.');
+        return;
+      }
+      paymentOnAccountPence = poundsToMinorUnits(cleanPoa);
+      if (paymentOnAccountPence <= 0) {
+        showToast('Please enter a Payment on Account amount greater than £0.00.');
+        return;
+      }
+      paymentOnAccountGbp = poaNum;
+    }
+
+    const linkedPersonRec = linkedPersonId ? peopleById.get(linkedPersonId) : undefined;
+    const linkedOrgRec = linkedOrganisationId ? orgsById.get(linkedOrganisationId) : undefined;
+    const linkedEmailFallback =
+      (linkedPersonRec && 'emails' in linkedPersonRec ? primaryEmail(linkedPersonRec) : '') ||
+      (linkedPersonRec && 'primaryEmail' in linkedPersonRec ? String(linkedPersonRec.primaryEmail ?? '') : '') ||
+      (linkedOrgRec && 'generalEmail' in linkedOrgRec ? String(linkedOrgRec.generalEmail ?? '') : '');
+    const effectiveRecipientEmail = (prospectEmail.trim() || linkedEmailFallback).trim();
+
+    if (markAsSent && sendMode === 'email' && !effectiveRecipientEmail) {
+      showToast('Please enter a client email address before sending the quote by email, or save and record it as sent offline.');
+      return;
+    }
+
+    const executeSave = async (idempotencyKey?: string) => {
       setQuoteFeeCapError(null);
       const feeArrangementPayload = arrangementBasis
         ? {
@@ -875,12 +960,23 @@ export function QuoteFormClient({
           vatAmount: effectiveVatOnFee,
           vatOverridden,
           disbursements,
+          paymentOnAccountRequired,
+          paymentOnAccountPence,
+          paymentOnAccountGbp,
+          priceTransparencyCustomNote: priceTransparencyCustomNote.trim() || null,
           scope,
           assumptions,
           validUntil,
           followUpAfterDays: Math.max(1, Number(followUpAfterDaysStr) || 7),
           revisionNote,
           markAsSent,
+          ...(markAsSent ? { sendMode } : {}),
+          ...(markAsSent && sendMode === 'email'
+            ? {
+                recipientEmail: effectiveRecipientEmail,
+                idempotencyKey,
+              }
+            : {}),
           refreshVatRate,
           rateGradeKey,
           refreshRates,
@@ -892,9 +988,14 @@ export function QuoteFormClient({
           showToast(errMsg);
           return;
         }
+        quoteSendControllerRef.current?.reset();
         showToast(
           markAsSent
-            ? `Revised to v${res.quote.version} and marked as sent (v${res.quote.version - 1} marked Superseded)`
+            ? sendMode === 'email'
+              ? res.emailProviderDisabled
+                ? `Revised to v${res.quote.version} and queued in outbox (email delivery disabled)`
+                : `Revised to v${res.quote.version} and sent by email`
+              : `Revised to v${res.quote.version} and recorded as sent offline`
             : `Revised quote saved as v${res.quote.version} draft`,
         );
         if (onSuccessOverride) {
@@ -928,6 +1029,10 @@ export function QuoteFormClient({
           vatAmount: effectiveVatOnFee,
           vatOverridden,
           disbursements,
+          paymentOnAccountRequired,
+          paymentOnAccountPence,
+          paymentOnAccountGbp,
+          priceTransparencyCustomNote: priceTransparencyCustomNote.trim() || null,
           validUntil,
           feeEarnerId,
           followUpAfterDays: Math.max(1, Number(followUpAfterDaysStr) || 7),
@@ -938,6 +1043,13 @@ export function QuoteFormClient({
         {
           id: existing?.id,
           markAsSent,
+          ...(markAsSent ? { sendMode } : {}),
+          ...(markAsSent && sendMode === 'email'
+            ? {
+                recipientEmail: effectiveRecipientEmail,
+                idempotencyKey,
+              }
+            : {}),
           refreshVatRate,
         },
       );
@@ -948,10 +1060,15 @@ export function QuoteFormClient({
         showToast(errMsg);
         return;
       }
+      quoteSendControllerRef.current?.reset();
 
       showToast(
         markAsSent
-          ? `Quote ${res.quote.reference} marked as sent · Follow-up scheduled for ${res.quote.nextFollowUpDate}`
+          ? sendMode === 'email'
+            ? res.emailProviderDisabled
+              ? `Quote ${res.quote.reference} queued in outbox (email delivery disabled) · Follow-up scheduled for ${res.quote.nextFollowUpDate}`
+              : `Quote ${res.quote.reference} sent by email · Follow-up scheduled for ${res.quote.nextFollowUpDate}`
+            : `Quote ${res.quote.reference} recorded as sent offline · Follow-up scheduled for ${res.quote.nextFollowUpDate}`
           : `Quote ${res.quote.reference} saved`,
       );
       if (onSuccessOverride) {
@@ -959,6 +1076,14 @@ export function QuoteFormClient({
       } else {
         router.push(`/quotes/${res.quote.id}`);
       }
+    };
+
+    startTransition(async () => {
+      if (markAsSent && sendMode === 'email') {
+        await getQuoteSendController().runGuarded(executeSave);
+        return;
+      }
+      await executeSave();
     });
   };
 
@@ -1990,6 +2115,132 @@ export function QuoteFormClient({
                 </div>
               )}
             </div>
+
+            <hr
+              style={{
+                margin: '4px 0',
+                border: 'none',
+                borderTop: '1px solid var(--border-subtle)',
+              }}
+            />
+
+            {/* Payment on Account on instruction */}
+            <div style={{ display: 'grid', gap: 10 }}>
+              <label
+                style={{
+                  display: 'inline-flex',
+                  alignItems: 'center',
+                  gap: 8,
+                  fontSize: 13.5,
+                  fontWeight: 600,
+                  cursor: 'pointer',
+                }}
+              >
+                <input
+                  type="checkbox"
+                  data-testid="quote-poa-toggle"
+                  checked={paymentOnAccountRequired}
+                  onChange={(e) => {
+                    const checked = e.target.checked;
+                    setPaymentOnAccountRequired(checked);
+                    if (!checked) setPaymentOnAccountGbpStr('');
+                  }}
+                />
+                <span>Request a Payment on Account before work begins</span>
+              </label>
+
+              {paymentOnAccountRequired ? (
+                <div className="field-group" style={{ maxWidth: 280, marginBottom: 0 }}>
+                  <label className="field-label" htmlFor="qte-poa-amount">
+                    Payment on Account amount (£) *
+                  </label>
+                  <input
+                    id="qte-poa-amount"
+                    data-testid="quote-poa-amount-input"
+                    type="number"
+                    min="0.01"
+                    step="0.01"
+                    className="field-input"
+                    placeholder="e.g. 500.00"
+                    value={paymentOnAccountGbpStr}
+                    onChange={(e) => setPaymentOnAccountGbpStr(e.target.value)}
+                  />
+                  <span className="field-hint">
+                    Carried over to the matter costs screen on conversion.
+                  </span>
+                </div>
+              ) : null}
+            </div>
+
+            <hr
+              style={{
+                margin: '4px 0',
+                border: 'none',
+                borderTop: '1px solid var(--border-subtle)',
+              }}
+            />
+
+            {/* Price Transparency Preview & Matter-specific custom note */}
+            <div
+              data-testid="quote-price-transparency-preview"
+              style={{ display: 'grid', gap: 8 }}
+            >
+              <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 8 }}>
+                <span className="field-label" style={{ marginBottom: 0 }}>
+                  Price Transparency disclosures ({resolvedPriceTransparency.enabled ? 'Included in PDF' : 'Turned off for work type'})
+                </span>
+                <StatusPill
+                  label={
+                    resolvedPriceTransparency.source === 'work_type'
+                      ? 'Work type wording'
+                      : resolvedPriceTransparency.source === 'practice_area'
+                        ? 'Practice area wording'
+                        : 'Firm default'
+                  }
+                  tone="neutral"
+                />
+              </div>
+              {resolvedPriceTransparency.enabled ? (
+                <div
+                  style={{
+                    padding: '10px 12px',
+                    borderRadius: 8,
+                    border: '1px solid var(--border-subtle)',
+                    background: 'var(--bg-subtle)',
+                    fontSize: 12.5,
+                    display: 'grid',
+                    gap: 4,
+                  }}
+                >
+                  {resolvedPriceTransparency.headlineSummary ? (
+                    <div><strong>Overview:</strong> {resolvedPriceTransparency.headlineSummary}</div>
+                  ) : null}
+                  {resolvedPriceTransparency.keyStages ? (
+                    <div><strong>Key stages:</strong> {resolvedPriceTransparency.keyStages}</div>
+                  ) : null}
+                  {resolvedPriceTransparency.typicalTimescales ? (
+                    <div><strong>Typical timescales:</strong> {resolvedPriceTransparency.typicalTimescales}</div>
+                  ) : null}
+                  {resolvedPriceTransparency.exclusionsAndVatNote ? (
+                    <div><strong>VAT &amp; exclusions:</strong> {resolvedPriceTransparency.exclusionsAndVatNote}</div>
+                  ) : null}
+                </div>
+              ) : null}
+              <div className="field-group" style={{ marginBottom: 0 }}>
+                <label className="field-label" htmlFor="qte-pt-custom-note">
+                  Additional matter-specific pricing note (optional)
+                </label>
+                <textarea
+                  id="qte-pt-custom-note"
+                  data-testid="quote-transparency-custom-note"
+                  className="field-input"
+                  rows={2}
+                  placeholder="Optional note frozen into the sent quote snapshot and quote PDF…"
+                  value={priceTransparencyCustomNote}
+                  onChange={(e) => setPriceTransparencyCustomNote(e.target.value)}
+                />
+              </div>
+            </div>
           </section>
 
           {/* 4. VALIDITY, FEE EARNER & FOLLOW-UP */}
@@ -2104,14 +2355,29 @@ export function QuoteFormClient({
             </button>
             <button
               type="button"
-              className="btn btn--primary"
+              className="btn btn--secondary"
               style={{ borderRadius: 999 }}
+              data-testid="quote-form-save-offline-btn"
               disabled={pending}
-              onClick={() => handleSubmit(true)}
+              onClick={() => handleSubmit(true, 'offline')}
             >
               {mode === 'revise'
-                ? `Save v${(existing?.version ?? 1) + 1} & mark as sent`
-                : 'Save & mark as sent'}
+                ? `Save v${(existing?.version ?? 1) + 1} offline`
+                : 'Record as sent offline'}
+            </button>
+            <button
+              type="button"
+              className="btn btn--primary"
+              style={{ borderRadius: 999 }}
+              data-testid="quote-form-send-email-btn"
+              disabled={pending}
+              onClick={() => handleSubmit(true, 'email')}
+            >
+              {mode === 'revise'
+                ? `Revise v${(existing?.version ?? 1) + 1} & send email`
+                : emailProviderDisabled
+                  ? 'Save & queue quote email'
+                  : 'Save & send quote by email'}
             </button>
           </div>
 
@@ -2571,6 +2837,20 @@ export function QuoteFormClient({
                   {formatGbp(totals.totalIncVat, true)}
                 </span>
               </div>
+              {paymentOnAccountRequired && Number(paymentOnAccountGbpStr) > 0 ? (
+                <div
+                  style={{
+                    display: 'flex',
+                    justifyContent: 'space-between',
+                    fontSize: 13,
+                    paddingTop: 4,
+                    color: 'var(--text-secondary)',
+                  }}
+                >
+                  <span>Payment on Account (on instruction)</span>
+                  <strong>{formatGbp(Number(paymentOnAccountGbpStr), true)}</strong>
+                </div>
+              ) : null}
             </div>
           </section>
         </aside>

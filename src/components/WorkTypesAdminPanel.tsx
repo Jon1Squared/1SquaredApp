@@ -7,6 +7,7 @@ import {
   type WorkTypeAutoTaskTemplateConfig,
   type WorkTypeConfigItem,
   type WorkTypeOpeningGateConfig,
+  type WorkTypePriceTransparencyConfig,
   type WorkTypeRiskQuestionConfig,
   type WorkTypeRiskQuestionOptionConfig,
   type WorkTypesConfiguration,
@@ -24,13 +25,18 @@ import type {
 } from '@/domain/types';
 import {
   clearWorkTypeOpeningGateSetting,
+  clearWorkTypePriceTransparencySetting,
   DEFAULT_WORK_TYPE_OPENING_GATE,
+  DEFAULT_WORK_TYPE_PRICE_TRANSPARENCY,
   resolveInheritedOpeningGateSetting,
+  resolveInheritedPriceTransparencySetting,
   resolveWorkTypeAutoTaskTemplates,
   resolveWorkTypeOpeningGateWithProvenance,
+  resolveWorkTypePriceTransparencyWithProvenance,
   resolveWorkTypeRetention,
   resolveWorkTypeRiskQuestions,
   type WorkTypeOpeningGateSettingKey,
+  type WorkTypePriceTransparencySettingKey,
 } from '@/domain/workTypeConfig';
 import { StatusPill } from './SearchBox';
 import { useToast } from './Toast';
@@ -529,6 +535,84 @@ export function WorkTypesAdminPanel({
                 );
               })}
             </div>
+          </div>
+
+          <hr style={{ border: 'none', borderTop: '1px solid var(--color-divider)' }} />
+
+          <div>
+            <h3 style={{ fontSize: 15, fontWeight: 700, marginBottom: 8 }}>
+              Firm Default Price Transparency Disclosures
+            </h3>
+            <p className="muted" style={{ fontSize: 12.5, marginBottom: 10 }}>
+              Default wording shown in quotes and quote PDFs unless overridden by a practice area or work type.
+            </p>
+            {(() => {
+              const basePt: WorkTypePriceTransparencyConfig = {
+                ...DEFAULT_WORK_TYPE_PRICE_TRANSPARENCY,
+                ...(draft.defaults.priceTransparency ?? {}),
+              };
+              const ptTextFields: Array<[Exclude<WorkTypePriceTransparencySettingKey, 'enabled'>, string]> = [
+                ['headlineSummary', 'Headline pricing summary'],
+                ['serviceDescription', 'What our service includes'],
+                ['keyStages', 'Key stages'],
+                ['typicalTimescales', 'Typical timescales'],
+                ['disbursementsGuidance', 'Disbursements guidance'],
+                ['exclusionsAndVatNote', 'Exclusions and VAT note'],
+              ];
+              return (
+                <div style={{ display: 'grid', gap: 10 }}>
+                  <label style={{ display: 'flex', alignItems: 'center', gap: 8, fontSize: 13 }}>
+                    <input
+                      type="checkbox"
+                      disabled={!canEdit}
+                      checked={Boolean(basePt.enabled)}
+                      data-testid="default-price-transparency-enabled"
+                      onChange={(e) =>
+                        setDraft((prev) => ({
+                          ...prev,
+                          defaults: {
+                            ...prev.defaults,
+                            priceTransparency: {
+                              ...basePt,
+                              ...(prev.defaults.priceTransparency ?? {}),
+                              enabled: e.target.checked,
+                            },
+                          },
+                        }))
+                      }
+                    />
+                    Include Price Transparency disclosures on quotes and PDFs by default
+                  </label>
+                  {ptTextFields.map(([ptKey, ptLabel]) => (
+                    <div key={ptKey} className="field-group" style={{ marginBottom: 0 }}>
+                      <label className="field-label" htmlFor={`wt-default-pt-${ptKey}`}>
+                        {ptLabel}
+                      </label>
+                      <textarea
+                        id={`wt-default-pt-${ptKey}`}
+                        className="field-input"
+                        rows={2}
+                        disabled={!canEdit}
+                        value={String(basePt[ptKey] ?? '')}
+                        onChange={(e) =>
+                          setDraft((prev) => ({
+                            ...prev,
+                            defaults: {
+                              ...prev.defaults,
+                              priceTransparency: {
+                                ...basePt,
+                                ...(prev.defaults.priceTransparency ?? {}),
+                                [ptKey]: e.target.value,
+                              },
+                            },
+                          }))
+                        }
+                      />
+                    </div>
+                  ))}
+                </div>
+              );
+            })()}
           </div>
 
           <hr style={{ border: 'none', borderTop: '1px solid var(--color-divider)' }} />
@@ -1169,6 +1253,184 @@ export function WorkTypesAdminPanel({
                                 Use inherited
                               </button>
                             ) : null}
+                          </div>
+                        );
+                      })}
+                    </div>
+                  );
+                })()}
+              </div>
+
+              <div>
+                <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: 6 }}>
+                  <h4 style={{ fontSize: 13, fontWeight: 700, margin: 0 }}>
+                    Price Transparency &amp; Service Information
+                  </h4>
+                  {selectedItem?.priceTransparency ? (
+                    <button
+                      type="button"
+                      className="btn btn--ghost btn--sm"
+                      disabled={!canEdit}
+                      onClick={() =>
+                        updateSelectedItem(selectedChoice, (item) => {
+                          const next = { ...item };
+                          delete next.priceTransparency;
+                          return next;
+                        })
+                      }
+                    >
+                      Inherit defaults
+                    </button>
+                  ) : null}
+                </div>
+                <p className="muted" style={{ fontSize: 12, marginBottom: 8 }}>
+                  {selectedItem?.priceTransparency
+                    ? 'Overrides are merged per field: this work type, then its parent practice area, then firm defaults.'
+                    : 'Currently inheriting Price Transparency disclosures from parent practice area and firm defaults.'}
+                </p>
+                {(() => {
+                  const resolvedPt = resolveWorkTypePriceTransparencyWithProvenance(draft, {
+                    workTypeSubcategoryId: selectedChoice.id,
+                    practiceAreaId: selectedChoice.parentId ?? undefined,
+                  });
+                  const sourceLabels = {
+                    work_type: 'Work type',
+                    practice_area: 'Practice area',
+                    firm_default: 'Firm default',
+                  } as const;
+                  const inheritedSourceLabels = {
+                    practice_area: 'Practice area',
+                    firm_default: 'Firm default',
+                    core_default: 'Core default',
+                  } as const;
+                  const ptTextFields: Array<[Exclude<WorkTypePriceTransparencySettingKey, 'enabled'>, string]> = [
+                    ['headlineSummary', 'Headline pricing summary'],
+                    ['serviceDescription', 'What our service includes'],
+                    ['keyStages', 'Key stages'],
+                    ['typicalTimescales', 'Typical timescales'],
+                    ['disbursementsGuidance', 'Disbursements guidance'],
+                    ['exclusionsAndVatNote', 'Exclusions and VAT note'],
+                  ];
+                  const isExplicitEnabled =
+                    typeof selectedItem?.priceTransparency?.enabled === 'boolean';
+                  const inheritedEnabled = resolveInheritedPriceTransparencySetting(
+                    draft,
+                    { practiceAreaId: selectedChoice.parentId ?? undefined },
+                    'enabled',
+                  );
+                  return (
+                    <div style={{ display: 'grid', gap: 10 }}>
+                      <div style={{ display: 'flex', flexWrap: 'wrap', alignItems: 'center', gap: 8, fontSize: 13 }}>
+                        <label style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
+                          <input
+                            type="checkbox"
+                            disabled={!canEdit}
+                            checked={Boolean(resolvedPt.enabled)}
+                            data-testid="work-type-price-transparency-enabled"
+                            onChange={(e) =>
+                              updateSelectedItem(selectedChoice, (item) => ({
+                                ...item,
+                                priceTransparency: {
+                                  ...(item.priceTransparency ?? {}),
+                                  enabled: e.target.checked,
+                                },
+                              }))
+                            }
+                          />
+                          <span>Include Price Transparency disclosures on quotes</span>
+                        </label>
+                        <StatusPill
+                          label={sourceLabels[resolvedPt.settingSources.enabled]}
+                          tone={resolvedPt.settingSources.enabled === 'work_type' ? 'warning' : 'neutral'}
+                        />
+                        <span className="muted" style={{ fontSize: 12 }}>
+                          Inherited: {inheritedEnabled.value ? 'On' : 'Off'} ({inheritedSourceLabels[inheritedEnabled.source]})
+                        </span>
+                        {isExplicitEnabled ? (
+                          <button
+                            type="button"
+                            className="btn btn--ghost btn--sm"
+                            disabled={!canEdit}
+                            data-testid="price-transparency-use-inherited-enabled"
+                            onClick={() =>
+                              updateSelectedItem(selectedChoice, (item) => {
+                                const nextPt = clearWorkTypePriceTransparencySetting(
+                                  item.priceTransparency,
+                                  'enabled',
+                                );
+                                const nextItem = { ...item };
+                                if (nextPt) nextItem.priceTransparency = nextPt;
+                                else delete nextItem.priceTransparency;
+                                return nextItem;
+                              })
+                            }
+                          >
+                            Use inherited
+                          </button>
+                        ) : null}
+                      </div>
+                      {ptTextFields.map(([ptKey, ptLabel]) => {
+                        const provenance = resolvedPt.settingSources[ptKey];
+                        const isExplicitText =
+                          typeof selectedItem?.priceTransparency?.[ptKey] === 'string';
+                        const inheritedText = resolveInheritedPriceTransparencySetting(
+                          draft,
+                          { practiceAreaId: selectedChoice.parentId ?? undefined },
+                          ptKey,
+                        );
+                        return (
+                          <div key={ptKey} className="field-group" style={{ marginBottom: 0 }}>
+                            <div style={{ display: 'flex', alignItems: 'center', gap: 8, flexWrap: 'wrap', marginBottom: 4 }}>
+                              <label className="field-label" htmlFor={`wt-item-pt-${ptKey}`} style={{ marginBottom: 0 }}>
+                                {ptLabel}
+                              </label>
+                              <StatusPill
+                                label={sourceLabels[provenance]}
+                                tone={provenance === 'work_type' ? 'warning' : 'neutral'}
+                              />
+                              <span className="muted" style={{ fontSize: 11.5 }}>
+                                Inherited from {inheritedSourceLabels[inheritedText.source]}
+                              </span>
+                              {isExplicitText ? (
+                                <button
+                                  type="button"
+                                  className="btn btn--ghost btn--sm"
+                                  disabled={!canEdit}
+                                  data-testid={`price-transparency-use-inherited-${ptKey}`}
+                                  onClick={() =>
+                                    updateSelectedItem(selectedChoice, (item) => {
+                                      const nextPt = clearWorkTypePriceTransparencySetting(
+                                        item.priceTransparency,
+                                        ptKey,
+                                      );
+                                      const nextItem = { ...item };
+                                      if (nextPt) nextItem.priceTransparency = nextPt;
+                                      else delete nextItem.priceTransparency;
+                                      return nextItem;
+                                    })
+                                  }
+                                >
+                                  Use inherited
+                                </button>
+                              ) : null}
+                            </div>
+                            <textarea
+                              id={`wt-item-pt-${ptKey}`}
+                              className="field-input"
+                              rows={2}
+                              disabled={!canEdit}
+                              data-testid={`price-transparency-input-${ptKey}`}
+                              value={resolvedPt[ptKey]}
+                              onChange={(e) =>
+                                updateSelectedItem(selectedChoice, (item) => ({
+                                  ...item,
+                                  priceTransparency: {
+                                    ...(item.priceTransparency ?? {}),
+                                    [ptKey]: e.target.value,
+                                  },
+                                }))
+                              }
+                            />
                           </div>
                         );
                       })}

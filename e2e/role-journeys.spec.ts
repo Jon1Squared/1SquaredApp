@@ -1844,3 +1844,89 @@ test.describe.serial('S1-06: Client Care dispatch, Admin Email Outbox viewer, si
     }
   });
 });
+
+test.describe.serial('S1-07: Quote POA, Price Transparency, PDF download, email dispatch & offline record', () => {
+  test('1. Fee earner creates quote with POA and Price Transparency, downloads clean PDF, queues email dispatch & verifies offline option has no chase', async ({
+    browser,
+  }) => {
+    const feContext = await browser.newContext({
+      storageState: storageStatePathFor('fee_earner'),
+    });
+    const fePage = await feContext.newPage();
+    const feErrors = attachPageErrorCollector(fePage);
+
+    try {
+      const uniqueEmail = `s107.quote.e2e.${Date.now()}@example.test`;
+      await fePage.goto('/quotes/new');
+      await fePage.locator('#qte-first-name').fill('Nia');
+      await fePage.locator('#qte-surname').fill('Tomos');
+      await fePage.locator('#qte-prospect-email').fill(uniqueEmail);
+      await fePage
+        .locator('#qte-practice-area')
+        .selectOption('work_type.real_estate_and_property');
+      await fePage
+        .locator('#qte-work-type')
+        .selectOption('work_type.real_estate_and_property_residential_conveyancing');
+      await expect(fePage.getByTestId('quote-price-transparency-preview')).toContainText(
+        'conveyancing',
+        { timeout: 10_000 },
+      );
+      await fePage
+        .locator('#qte-scope')
+        .fill('Freehold residential purchase and Land Registry registration.');
+      await fePage.locator('#qte-fee-amount').fill('1650');
+      await fePage.getByTestId('quote-poa-toggle').check();
+      await fePage.getByTestId('quote-poa-amount-input').fill('500');
+      await fePage
+        .getByTestId('quote-transparency-custom-note')
+        .fill('Includes gifted deposit verification.');
+
+      await fePage.getByRole('button', { name: 'Save as draft' }).click();
+      await expect(fePage).toHaveURL(/\/quotes\/(Q-\d{4}-\d+)$/, { timeout: 20_000 });
+      const quoteId = fePage.url().match(/\/quotes\/(Q-\d{4}-\d+)$/)?.[1] ?? '';
+      expect(quoteId).toBeTruthy();
+
+      const pdfRes = await fePage.request.get(`/api/quotes/${encodeURIComponent(quoteId)}/pdf`);
+      expect(pdfRes.status()).toBe(200);
+      expect(pdfRes.headers()['content-type']).toBe('application/pdf');
+      const pdfBytes = await pdfRes.body();
+      expect(pdfBytes.subarray(0, 5).toString('latin1')).toBe('%PDF-');
+      expect(JSON.stringify(pdfRes.headers())).not.toMatch(/amlStatus|clientCddStatus/);
+
+      await expect(fePage.getByTestId('quote-poa-summary-row')).toContainText('£500.00');
+      await fePage.getByTestId('quote-send-email-open-btn').click();
+      await expect(fePage.getByTestId('quote-send-email-input')).toHaveValue(uniqueEmail);
+      await fePage.getByTestId('quote-send-email-submit-btn').click();
+
+      await expect(fePage.getByTestId('quote-outbox-queued-banner')).toBeVisible({
+        timeout: 15_000,
+      });
+      await expect(fePage.getByTestId('quote-chase-summary')).toContainText('Active', {
+        timeout: 15_000,
+      });
+      await expect(fePage.getByTestId('quote-price-transparency-card')).toContainText(
+        'Includes gifted deposit verification.',
+      );
+
+      // Offline dispatch flow creates Sent status with zero automated follow-up chase
+      await fePage.goto('/quotes/new');
+      await fePage.locator('#qte-first-name').fill('Bryn');
+      await fePage.locator('#qte-surname').fill('Madoc');
+      await fePage.locator('#qte-prospect-email').fill(`offline.${Date.now()}@example.test`);
+      await fePage.locator('#qte-scope').fill('Standalone commercial contract advice.');
+      await fePage.locator('#qte-fee-amount').fill('950');
+      await fePage.getByRole('button', { name: 'Save as draft' }).click();
+      await expect(fePage).toHaveURL(/\/quotes\/(Q-\d{4}-\d+)$/, { timeout: 20_000 });
+
+      await fePage.getByTestId('quote-mark-offline-open-btn').click();
+      await fePage.getByTestId('quote-mark-offline-note-input').fill('Posted in envelope');
+      await fePage.getByTestId('quote-mark-offline-submit-btn').click();
+      await expect(fePage.getByTestId('quote-chase-summary')).toHaveCount(0, {
+        timeout: 10_000,
+      });
+      expect(feErrors).toEqual([]);
+    } finally {
+      await feContext.close();
+    }
+  });
+});

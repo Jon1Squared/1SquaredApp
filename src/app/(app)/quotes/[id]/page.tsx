@@ -39,6 +39,8 @@ export default async function QuoteDetailPage({
         workTypesConfig={shell.store.workTypesConfig}
         firmFeeArrangementCaps={shell.store.matterCostsConfig.feeArrangementCaps}
         initialAction={sp.action ?? null}
+        quoteChases={data.quoteChases}
+        emailProviderDisabled={data.emailProviderDisabled}
       />
     );
   }, buildRouteReturnTo(`/quotes/${encodeURIComponent(id)}`, sp));

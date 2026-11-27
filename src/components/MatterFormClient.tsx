@@ -1169,11 +1169,6 @@ export function MatterFormClient({
     }
     return '';
   });
-  const [retainerMoniesOnAccountGbp, setRetainerMoniesOnAccountGbp] = useState<string>(
-    existing?.retainerMoniesOnAccountGbp != null
-      ? String(existing.retainerMoniesOnAccountGbp)
-      : '',
-  );
   const [openedAt, setOpenedAt] = useState<string | null>(existing?.openedAt ?? null);
   const [targetCompletionAt, setTargetCompletionAt] = useState<string | null>(
     existing?.targetCompletionAt ?? initialEnquiry?.keyDate ?? null,
@@ -1289,6 +1284,13 @@ export function MatterFormClient({
   const [paymentOnAccountRequired, setPaymentOnAccountRequired] = useState<
     'Yes' | 'No' | ''
   >(initialMatterCosts.paymentOnAccountRequired);
+  const [retainerMoniesOnAccountGbp, setRetainerMoniesOnAccountGbp] = useState<string>(
+    existing?.retainerMoniesOnAccountGbp != null
+      ? String(existing.retainerMoniesOnAccountGbp)
+      : initialMatterCosts.paymentOnAccountAmountGbp != null
+        ? String(initialMatterCosts.paymentOnAccountAmountGbp)
+        : '',
+  );
   const [costNotes, setCostNotes] = useState<string>(
     initialMatterCosts.notes ?? '',
   );
@@ -5594,8 +5596,23 @@ export function MatterFormClient({
                   View quote ↗
                 </Link>
               </div>
-              {initialQuote.disbursements.length > 0 || initialQuote.assumptions ? (
+              {initialQuote.disbursements.length > 0 ||
+              initialQuote.assumptions ||
+              (initialQuote.paymentOnAccountRequired &&
+                (initialQuote.paymentOnAccountGbp ?? initialQuote.paymentOnAccountPence)) ? (
                 <div style={{ fontSize: 12.5, color: 'var(--text-secondary)', paddingLeft: 26 }}>
+                  {initialQuote.paymentOnAccountRequired &&
+                  (initialQuote.paymentOnAccountGbp != null ||
+                    initialQuote.paymentOnAccountPence != null) ? (
+                    <div data-testid="matter-quote-poa-carryover">
+                      <strong>Payment on Account carried over:</strong>{' '}
+                      {formatGbp(
+                        initialQuote.paymentOnAccountGbp ??
+                          Number(initialQuote.paymentOnAccountPence ?? 0) / 100,
+                        true,
+                      )}
+                    </div>
+                  ) : null}
                   {initialQuote.disbursements.length > 0 ? (
                     <div>
                       <strong>Disbursements:</strong>{' '}

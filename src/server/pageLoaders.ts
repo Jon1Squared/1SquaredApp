@@ -3623,6 +3623,11 @@ export async function loadQuoteDetailPageData(
   organisations: Organisation[];
   links: PersonOrganisationLink[];
   initialResolvedRates: ResolvedApplicableRatesResult | null;
+  quoteChases: Array<{
+    chase: import('@platform/core').CommunicationChaseRecord;
+    events: import('@platform/core').CommunicationChaseEventRecord[];
+  }>;
+  emailProviderDisabled: boolean;
 } | null> {
   return withPageShell(actorId, options, async (shell) => {
   if (!shell.canViewQuotes) return null;
@@ -3645,7 +3650,7 @@ export async function loadQuoteDetailPageData(
       ? 'person'
       : null;
 
-  const [linkedEnquiry, convertedMatter, ratesRes, links] = await Promise.all([
+  const [linkedEnquiry, convertedMatter, ratesRes, links, quoteChasesRaw] = await Promise.all([
     quote.linkedEnquiryId
       ? intakeRepo.getEnquiryById<Enquiry>(ctx, quote.linkedEnquiryId, {
           viewerId: currentUserId,
@@ -3676,6 +3681,10 @@ export async function loadQuoteDetailPageData(
           personIds: quote.linkedPersonId ? [quote.linkedPersonId] : [],
         })
       : Promise.resolve<PersonOrganisationLink[]>([]),
+    getChasingRepository().listChasesForEntity(ctx, {
+      entityKind: 'quote',
+      entityId: quote.id,
+    }),
   ]);
 
   const enquiries = linkedEnquiry ? [linkedEnquiry] : [];
@@ -3699,6 +3708,12 @@ export async function loadQuoteDetailPageData(
     links,
     initialResolvedRates:
       ratesRes && !isActionDenied(ratesRes) ? (ratesRes.resolved ?? null) : null,
+    quoteChases: quoteChasesRaw.map((c) => ({
+      chase: c.chase,
+      events: [...c.events],
+    })),
+    emailProviderDisabled:
+      shell.activeTenantCfg.integrations.email?.provider === 'disabled',
   };
   });
 }
@@ -3715,6 +3730,7 @@ export async function loadQuoteFormPageData(
   people: Person[];
   organisations: Organisation[];
   links: PersonOrganisationLink[];
+  emailProviderDisabled: boolean;
 } | null> {
   return withPageShell(actorId, options, async (shell) => {
   if (
@@ -3781,6 +3797,8 @@ export async function loadQuoteFormPageData(
     people,
     organisations,
     links,
+    emailProviderDisabled:
+      shell.activeTenantCfg.integrations.email?.provider === 'disabled',
   };
   });
 }

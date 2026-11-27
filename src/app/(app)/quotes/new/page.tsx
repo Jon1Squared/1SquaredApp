@@ -33,6 +33,7 @@ export default async function NewQuotePage({
         tenantVatRatePercent={shell.store.matterCostsConfig.vatRatePercent}
         workTypesConfig={shell.store.workTypesConfig}
         firmFeeArrangementCaps={shell.store.matterCostsConfig.feeArrangementCaps}
+        emailProviderDisabled={data.emailProviderDisabled}
       />
     );
   }, buildRouteReturnTo('/quotes/new', sp));

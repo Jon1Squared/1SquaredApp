@@ -1,13 +1,16 @@
 'use client';
 
-import React, { useEffect, useMemo, useState, useTransition } from 'react';
+import React, { useEffect, useMemo, useRef, useState, useTransition } from 'react';
 import Link from 'next/link';
 import { useRouter } from 'next/navigation';
 import {
   logQuoteFollowUpAction,
-  markQuoteSentAction,
+  markQuoteSentOfflineAction,
   prepareQuoteConversionAction,
   recordQuoteOutcomeAction,
+  retryCommunicationChaseAction,
+  sendQuoteEmailAction,
+  stopCommunicationChaseAction,
 } from '@/app/actions';
 import { isActionDenied } from '@/domain/actionResult';
 import { quoteStatusTone } from '@/domain/badges';
@@ -15,7 +18,7 @@ import { addDays, formatDate, formatDateTime, toIsoDate } from '@/domain/dates';
 import { enquiryDisplayName } from '@/domain/enquiries';
 import { resolveLabel } from '@/domain/lists';
 import { formatConversionConflictWarningsNotice } from '@/domain/matterConflicts';
-import { personDisplayName } from '@/domain/names';
+import { personDisplayName, primaryEmail } from '@/domain/names';
 import {
   calculateQuoteTotals,
   evaluateQuoteEffectiveStatus,
@@ -39,15 +42,19 @@ import type {
   QuoteDeclineReason,
 } from '@/domain/types';
 import {
+  formatMinorUnitsGbp,
   minorUnitsToPounds,
   poundsToMinorUnits,
   sumMinorUnits,
+  type CommunicationChaseEventRecord,
+  type CommunicationChaseRecord,
   type FeeArrangementCapEntry,
   type ResolvedApplicableRatesResult,
   type WorkTypesConfiguration,
 } from '@platform/core-api';
 import { formatRateTierBadgeLabel } from '@/domain/matterCosts';
 import { QuoteFormClient } from './QuoteFormClient';
+import { createSendIdempotencyController } from './sendIdempotency';
 import { StatusPill } from './SearchBox';
 import { useToast } from './Toast';
 
@@ -67,6 +74,11 @@ interface Props {
   firmFeeArrangementCaps?: FeeArrangementCapEntry[];
   initialAction?: string | null;
   initialResolvedRates?: ResolvedApplicableRatesResult | null;
+  quoteChases?: Array<{
+    chase: CommunicationChaseRecord;
+    events: CommunicationChaseEventRecord[];
+  }>;
+  emailProviderDisabled?: boolean;
 }
 
 export function QuoteDetailClient({
@@ -85,6 +97,8 @@ export function QuoteDetailClient({
   firmFeeArrangementCaps,
   initialAction = null,
   initialResolvedRates = null,
+  quoteChases = [],
+  emailProviderDisabled = false,
 }: Props) {
   const router = useRouter();
   const { showToast } = useToast();
@@ -108,6 +122,76 @@ export function QuoteDetailClient({
   const [outcomeType, setOutcomeType] = useState<'Accepted' | 'Declined'>('Accepted');
   const [declineReason, setDeclineReason] = useState<QuoteDeclineReason>('Price');
   const [outcomeNote, setOutcomeNote] = useState('');
+
+  // Email & offline dispatch modals
+  const linkedPersonRec = useMemo(
+    () => (quote.linkedPersonId ? people.find((p) => p.id === quote.linkedPersonId) ?? null : null),
+    [people, quote.linkedPersonId],
+  );
+  const linkedOrgRec = useMemo(
+    () =>
+      quote.linkedOrganisationId
+        ? organisations.find((o) => o.id === quote.linkedOrganisationId) ?? null
+        : null,
+    [organisations, quote.linkedOrganisationId],
+  );
+  const linkedEnquiryForEmail = useMemo(
+    () => (quote.linkedEnquiryId ? enquiries.find((e) => e.id === quote.linkedEnquiryId) ?? null : null),
+    [enquiries, quote.linkedEnquiryId],
+  );
+  const resolvedDefaultEmail = (
+    quote.sentToEmail ||
+    quote.prospectEmail ||
+    (linkedPersonRec ? primaryEmail(linkedPersonRec) : '') ||
+    linkedOrgRec?.generalEmail ||
+    linkedEnquiryForEmail?.email ||
+    ''
+  ).trim();
+  const [sendEmailModalOpen, setSendEmailModalOpen] = useState(false);
+  const [sendRecipientEmail, setSendRecipientEmail] = useState(resolvedDefaultEmail);
+  const [sendRecipientName, setSendRecipientName] = useState(
+    quote.prospectName || (linkedPersonRec ? personDisplayName(linkedPersonRec) : linkedOrgRec?.legalName ?? ''),
+  );
+  const [sendCustomNote, setSendCustomNote] = useState(
+    quote.priceTransparencySnapshot?.customNote ?? '',
+  );
+  const [sendEmailError, setSendEmailError] = useState<string | null>(null);
+  const [queuedNoticeVisible, setQueuedNoticeVisible] = useState(false);
+
+  const [offlineModalOpen, setOfflineModalOpen] = useState(false);
+  const [offlineSentDate, setOfflineSentDate] = useState(() => toIsoDate(new Date()));
+  const [offlineNote, setOfflineNote] = useState('');
+  const [chaseBusy, setChaseBusy] = useState(false);
+
+  const quoteSendControllerRef = useRef<ReturnType<
+    typeof createSendIdempotencyController
+  > | null>(null);
+  const getQuoteSendController = () => {
+    if (!quoteSendControllerRef.current) {
+      quoteSendControllerRef.current = createSendIdempotencyController();
+    }
+    return quoteSendControllerRef.current;
+  };
+  useEffect(() => {
+    quoteSendControllerRef.current?.reset();
+  }, [quote.id, quote.version, resolvedDefaultEmail]);
+
+  const openSendEmailModal = () => {
+    setSendRecipientEmail(resolvedDefaultEmail);
+    setSendEmailError(null);
+    setSendEmailModalOpen(true);
+  };
+
+  const activeOrLatestChase = useMemo(
+    () =>
+      quoteChases.find(
+        (c) =>
+          c.chase.status === 'active' ||
+          c.chase.status === 'needs_owner' ||
+          c.chase.status === 'failed',
+      ) ?? quoteChases[0] ?? null,
+    [quoteChases],
+  );
 
   const effectiveStatus = evaluateQuoteEffectiveStatus(quote, now);
   const overdueFollowUp = isQuoteFollowUpOverdue(quote, now);
@@ -146,15 +230,61 @@ export function QuoteDetailClient({
     return p ? personDisplayName(p) : id;
   };
 
-  const handleMarkAsSent = () => {
+  const handleSendQuoteEmailSubmit = (e: React.FormEvent) => {
+    e.preventDefault();
+    const cleanEmail = sendRecipientEmail.trim();
+    if (!cleanEmail || !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(cleanEmail)) {
+      setSendEmailError('Please enter a valid recipient email address.');
+      return;
+    }
+    setSendEmailError(null);
     startTransition(async () => {
-      const res = await markQuoteSentAction(quote.id);
-      if (res.error || !res.quote) {
-        showToast(res.error ?? 'Failed to mark quote as sent');
+      await getQuoteSendController().runGuarded(async (idempotencyKey) => {
+        const res = await sendQuoteEmailAction({
+          quoteId: quote.id,
+          recipientEmail: cleanEmail,
+          recipientName: sendRecipientName.trim() || undefined,
+          customNote: sendCustomNote.trim() || undefined,
+          idempotencyKey,
+        });
+        if (isActionDenied(res) || !res.ok) {
+          const msg = isActionDenied(res) ? res.message : res.message;
+          setSendEmailError(msg || 'Failed to send quote email.');
+          showToast(msg || 'Failed to send quote email.');
+          return;
+        }
+        quoteSendControllerRef.current?.reset();
+        setSendEmailModalOpen(false);
+        if (res.emailProviderDisabled) {
+          setQueuedNoticeVisible(true);
+          showToast('Quote email queued in outbox (email delivery is currently disabled).');
+        } else {
+          showToast(
+            `Quote ${res.quote.reference} sent to ${cleanEmail} · Follow-up scheduled for ${formatDate(res.quote.nextFollowUpDate)}`,
+          );
+        }
+        router.refresh();
+      });
+    });
+  };
+
+  const handleMarkSentOfflineSubmit = (e: React.FormEvent) => {
+    e.preventDefault();
+    startTransition(async () => {
+      const res = await markQuoteSentOfflineAction({
+        quoteId: quote.id,
+        sentDate: offlineSentDate.trim() || undefined,
+        note: offlineNote.trim() || undefined,
+      });
+      if (isActionDenied(res) || !res.ok) {
+        const msg = isActionDenied(res) ? res.message : res.message;
+        showToast(msg || 'Failed to mark quote as sent offline.');
         return;
       }
+      setOfflineModalOpen(false);
+      setOfflineNote('');
       showToast(
-        `Quote ${res.quote.reference} marked as sent · First follow-up scheduled for ${formatDate(res.quote.nextFollowUpDate)}`,
+        `Quote ${res.quote.reference} recorded as sent offline · Follow-up scheduled for ${formatDate(res.quote.nextFollowUpDate)}`,
       );
       router.refresh();
     });
@@ -261,6 +391,7 @@ export function QuoteDetailClient({
         tenantVatRatePercent={tenantVatRatePercent}
         workTypesConfig={workTypesConfig}
         firmFeeArrangementCaps={firmFeeArrangementCaps}
+        emailProviderDisabled={emailProviderDisabled}
         onCancelOverride={() => setViewMode('detail')}
         onSuccessOverride={() => {
           setViewMode('detail');
@@ -320,6 +451,16 @@ export function QuoteDetailClient({
 
         {/* AVAILABLE ACTIONS */}
         <div className="page-header__actions" style={{ gap: 8, flexWrap: 'wrap' }}>
+          <a
+            href={`/api/quotes/${encodeURIComponent(quote.id)}/pdf`}
+            target="_blank"
+            rel="noopener noreferrer"
+            className="btn btn--secondary"
+            data-testid="quote-download-pdf-link"
+          >
+            Download PDF
+          </a>
+
           {effectiveStatus === 'Draft' ? (
             <>
               <button
@@ -332,17 +473,36 @@ export function QuoteDetailClient({
               </button>
               <button
                 type="button"
-                className="btn btn--primary"
+                className="btn btn--secondary"
+                data-testid="quote-mark-offline-open-btn"
                 disabled={pending}
-                onClick={handleMarkAsSent}
+                onClick={() => setOfflineModalOpen(true)}
               >
-                Mark as sent
+                Record as Sent Offline
+              </button>
+              <button
+                type="button"
+                className="btn btn--primary"
+                data-testid="quote-send-email-open-btn"
+                disabled={pending}
+                onClick={openSendEmailModal}
+              >
+                Send Quote by Email
               </button>
             </>
           ) : null}
 
           {effectiveStatus === 'Sent' || effectiveStatus === 'Follow-up due' ? (
             <>
+              <button
+                type="button"
+                className="btn btn--secondary"
+                data-testid="quote-send-email-open-btn"
+                disabled={pending}
+                onClick={openSendEmailModal}
+              >
+                Re-send Quote by Email
+              </button>
               <button
                 type="button"
                 className="btn btn--primary"
@@ -433,6 +593,21 @@ export function QuoteDetailClient({
       </div>
 
       {/* BANNERS */}
+      {emailProviderDisabled && (queuedNoticeVisible || quote.lastSentOutboxId) ? (
+        <div
+          className="banner banner--warning"
+          role="status"
+          data-testid="quote-outbox-queued-banner"
+          style={{ marginBottom: 16 }}
+        >
+          <div>
+            <strong>Quote email queued in outbox</strong>
+            {quote.sentToEmail ? ` for ${quote.sentToEmail}` : ''}: live email delivery is currently
+            disabled in tenant settings, so the PDF message remains pending in the email outbox
+            rather than being delivered externally.
+          </div>
+        </div>
+      ) : null}
       {overdueFollowUp ? (
         <div
           className="banner banner--warning"
@@ -873,9 +1048,92 @@ export function QuoteDetailClient({
                     {formatGbp(totals.totalIncVat, true)}
                   </td>
                 </tr>
+                {quote.paymentOnAccountRequired ? (
+                  <tr className="data-list__row" data-testid="quote-poa-summary-row">
+                    <td className="data-list__td">
+                      <strong>Payment on Account (requested before work begins)</strong>
+                    </td>
+                    <td className="data-list__td data-list__td--right">—</td>
+                    <td className="data-list__td data-list__td--right">—</td>
+                    <td className="data-list__td data-list__td--right">
+                      <strong>
+                        {typeof quote.paymentOnAccountPence === 'number'
+                          ? formatMinorUnitsGbp(quote.paymentOnAccountPence)
+                          : formatGbp(quote.paymentOnAccountGbp ?? 0, true)}
+                      </strong>
+                    </td>
+                  </tr>
+                ) : null}
               </tbody>
             </table>
           </section>
+
+          {/* PRICE TRANSPARENCY SNAPSHOT */}
+          {quote.priceTransparencySnapshot?.enabled ? (
+            <section
+              className="card"
+              style={{ padding: 20 }}
+              data-testid="quote-price-transparency-card"
+            >
+              <div
+                style={{
+                  display: 'flex',
+                  alignItems: 'center',
+                  justifyContent: 'space-between',
+                  marginBottom: 10,
+                }}
+              >
+                <h2 style={{ fontSize: 16, margin: 0 }}>Price Transparency disclosures</h2>
+                {quote.priceTransparencySnapshot.capturedAt ? (
+                  <span className="muted" style={{ fontSize: 12 }}>
+                    Frozen {formatDateTime(quote.priceTransparencySnapshot.capturedAt)}
+                  </span>
+                ) : null}
+              </div>
+              <div style={{ display: 'grid', gap: 8, fontSize: 13.5 }}>
+                {quote.priceTransparencySnapshot.headlineSummary ? (
+                  <div>
+                    <strong>Overview:</strong> {quote.priceTransparencySnapshot.headlineSummary}
+                  </div>
+                ) : null}
+                {quote.priceTransparencySnapshot.serviceDescription ? (
+                  <div>
+                    <strong>Service included:</strong>{' '}
+                    {quote.priceTransparencySnapshot.serviceDescription}
+                  </div>
+                ) : null}
+                {quote.priceTransparencySnapshot.keyStages ? (
+                  <div>
+                    <strong>Key stages:</strong> {quote.priceTransparencySnapshot.keyStages}
+                  </div>
+                ) : null}
+                {quote.priceTransparencySnapshot.typicalTimescales ? (
+                  <div>
+                    <strong>Typical timescales:</strong>{' '}
+                    {quote.priceTransparencySnapshot.typicalTimescales}
+                  </div>
+                ) : null}
+                {quote.priceTransparencySnapshot.disbursementsGuidance ? (
+                  <div>
+                    <strong>Disbursements guidance:</strong>{' '}
+                    {quote.priceTransparencySnapshot.disbursementsGuidance}
+                  </div>
+                ) : null}
+                {quote.priceTransparencySnapshot.exclusionsAndVatNote ? (
+                  <div>
+                    <strong>VAT &amp; exclusions:</strong>{' '}
+                    {quote.priceTransparencySnapshot.exclusionsAndVatNote}
+                  </div>
+                ) : null}
+                {quote.priceTransparencySnapshot.customNote ? (
+                  <div>
+                    <strong>Matter-specific note:</strong>{' '}
+                    {quote.priceTransparencySnapshot.customNote}
+                  </div>
+                ) : null}
+              </div>
+            </section>
+          ) : null}
 
           {/* VERSION HISTORY */}
           {quote.versionHistory.length > 0 ? (
@@ -944,6 +1202,19 @@ export function QuoteDetailClient({
                           {ver.feeArrangementCapBaseDescription}
                         </div>
                       ) : null}
+                      {ver.paymentOnAccountRequired ? (
+                        <div className="muted" style={{ fontSize: 12, marginTop: 2 }}>
+                          Payment on Account:{' '}
+                          {typeof ver.paymentOnAccountPence === 'number'
+                            ? formatMinorUnitsGbp(ver.paymentOnAccountPence)
+                            : formatGbp(ver.paymentOnAccountGbp ?? 0, true)}
+                        </div>
+                      ) : null}
+                      {ver.priceTransparencySnapshot?.headlineSummary ? (
+                        <div className="muted" style={{ fontSize: 12, marginTop: 2 }}>
+                          Price Transparency snapshot: {ver.priceTransparencySnapshot.headlineSummary}
+                        </div>
+                      ) : null}
                       <div className="muted" style={{ fontSize: 12, marginTop: 4 }}>
                         Superseded {formatDateTime(ver.supersededAt)} by {nameOfPerson(ver.byId)}
                         {ver.revisionNote ? ` — "${ver.revisionNote}"` : ''}
@@ -960,6 +1231,128 @@ export function QuoteDetailClient({
 
         {/* RIGHT COLUMN: STATUS TIMELINE & FOLLOW-UP HISTORY */}
         <div style={{ display: 'flex', flexDirection: 'column', gap: 18 }}>
+          {activeOrLatestChase ? (
+            <section
+              className="card"
+              style={{ padding: 20 }}
+              data-testid="quote-chase-summary"
+            >
+              <div
+                style={{
+                  display: 'flex',
+                  justifyContent: 'space-between',
+                  alignItems: 'center',
+                  gap: 8,
+                  marginBottom: 8,
+                }}
+              >
+                <h2 style={{ fontSize: 16, margin: 0 }}>Automated follow-up</h2>
+                <StatusPill
+                  label={
+                    activeOrLatestChase.chase.status === 'active'
+                      ? 'Active'
+                      : activeOrLatestChase.chase.status === 'needs_owner'
+                        ? 'Needs owner'
+                        : activeOrLatestChase.chase.status === 'failed'
+                          ? 'Failed'
+                          : activeOrLatestChase.chase.status === 'completed'
+                            ? 'Escalated'
+                            : 'Stopped'
+                  }
+                  tone={
+                    activeOrLatestChase.chase.status === 'active'
+                      ? 'positive'
+                      : activeOrLatestChase.chase.status === 'stopped'
+                        ? 'neutral'
+                        : 'warning'
+                  }
+                />
+              </div>
+              <div className="muted" style={{ fontSize: 12.5, marginBottom: 10 }}>
+                {activeOrLatestChase.chase.status === 'stopped'
+                  ? `Stopped${activeOrLatestChase.chase.stoppedReason ? ` (${activeOrLatestChase.chase.stoppedReason})` : ''}.`
+                  : activeOrLatestChase.chase.status === 'needs_owner'
+                    ? 'No eligible team member or fee earner could receive the escalation task.'
+                    : activeOrLatestChase.chase.status === 'failed'
+                      ? 'Automated chasing paused after repeated delivery errors.'
+                      : activeOrLatestChase.chase.status === 'completed'
+                        ? 'Day 21 escalation task created.'
+                        : (
+                          <>
+                            Chasing {activeOrLatestChase.chase.recipientEmail || 'client'} &middot;{' '}
+                            {activeOrLatestChase.events.length} reminder step(s) completed &middot;{' '}
+                            {activeOrLatestChase.chase.nextActionAt
+                              ? `Next action due ${formatDateTime(activeOrLatestChase.chase.nextActionAt)}`
+                              : 'Escalation pending'}
+                          </>
+                        )}
+              </div>
+              <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap' }}>
+                {activeOrLatestChase.chase.status === 'needs_owner' ||
+                activeOrLatestChase.chase.status === 'failed' ? (
+                  <button
+                    type="button"
+                    className="btn btn--secondary btn--sm"
+                    data-testid="retry-quote-chase-btn"
+                    disabled={chaseBusy}
+                    onClick={async () => {
+                      setChaseBusy(true);
+                      try {
+                        const res = await retryCommunicationChaseAction({
+                          chaseId: activeOrLatestChase.chase.id,
+                        });
+                        if (isActionDenied(res) || !res.ok) {
+                          showToast(
+                            isActionDenied(res)
+                              ? res.message
+                              : res.message || 'Could not retry quote follow-up.',
+                          );
+                          return;
+                        }
+                        showToast('Quote automated follow-up updated.');
+                        router.refresh();
+                      } finally {
+                        setChaseBusy(false);
+                      }
+                    }}
+                  >
+                    Retry follow-up
+                  </button>
+                ) : null}
+                {activeOrLatestChase.chase.status === 'active' ||
+                activeOrLatestChase.chase.status === 'needs_owner' ? (
+                  <button
+                    type="button"
+                    className="btn btn--secondary btn--sm"
+                    data-testid="stop-quote-chase-btn"
+                    disabled={chaseBusy}
+                    onClick={async () => {
+                      setChaseBusy(true);
+                      try {
+                        const res = await stopCommunicationChaseAction({
+                          chaseId: activeOrLatestChase.chase.id,
+                        });
+                        if (isActionDenied(res) || !res.ok) {
+                          showToast(
+                            isActionDenied(res)
+                              ? res.message
+                              : res.message || 'Could not stop automated quote chasing.',
+                          );
+                          return;
+                        }
+                        showToast('Automated quote chasing stopped.');
+                        router.refresh();
+                      } finally {
+                        setChaseBusy(false);
+                      }
+                    }}
+                  >
+                    Stop chasing
+                  </button>
+                ) : null}
+              </div>
+            </section>
+          ) : null}
           <section className="card" style={{ padding: 20 }}>
             <div
               style={{
@@ -1206,6 +1599,180 @@ export function QuoteDetailClient({
               </button>
               <button type="submit" className="btn btn--primary" disabled={pending}>
                 Save outcome
+              </button>
+            </div>
+          </form>
+        </div>
+      ) : null}
+
+      {/* MODAL: SEND QUOTE BY EMAIL */}
+      {sendEmailModalOpen ? (
+        <div
+          className="modal-backdrop"
+          role="dialog"
+          aria-modal="true"
+          aria-label="Send quote by email"
+        >
+          <form
+            className="modal"
+            onSubmit={handleSendQuoteEmailSubmit}
+            style={{ maxWidth: 480 }}
+          >
+            <div className="modal__header">
+              <h2>Send quote by email</h2>
+              <button
+                type="button"
+                className="btn btn--ghost btn--sm"
+                onClick={() => setSendEmailModalOpen(false)}
+              >
+                ✕
+              </button>
+            </div>
+            <div className="modal__body" style={{ display: 'flex', flexDirection: 'column', gap: 12 }}>
+              <div className="field">
+                <label className="field-label" htmlFor="qsend-email">
+                  Recipient email *
+                </label>
+                <input
+                  id="qsend-email"
+                  data-testid="quote-send-email-input"
+                  type="email"
+                  className="field-input"
+                  required
+                  value={sendRecipientEmail}
+                  onChange={(e) => setSendRecipientEmail(e.target.value)}
+                />
+              </div>
+              <div className="field">
+                <label className="field-label" htmlFor="qsend-name">
+                  Recipient name (optional)
+                </label>
+                <input
+                  id="qsend-name"
+                  type="text"
+                  className="field-input"
+                  value={sendRecipientName}
+                  onChange={(e) => setSendRecipientName(e.target.value)}
+                />
+              </div>
+              <div className="field">
+                <label className="field-label" htmlFor="qsend-note">
+                  Covering note (optional)
+                </label>
+                <textarea
+                  id="qsend-note"
+                  className="field-input"
+                  rows={3}
+                  placeholder="Optional message included in the email and frozen on the quote PDF…"
+                  value={sendCustomNote}
+                  onChange={(e) => setSendCustomNote(e.target.value)}
+                />
+              </div>
+              {emailProviderDisabled ? (
+                <p className="muted" style={{ fontSize: 12.5, margin: 0 }}>
+                  Live email delivery is currently disabled in tenant settings. Sending will queue
+                  the email with the quote PDF attached in the outbox and begin automated
+                  follow-ups.
+                </p>
+              ) : null}
+              {sendEmailError ? (
+                <div className="banner banner--warning" role="alert" style={{ margin: 0 }}>
+                  {sendEmailError}
+                </div>
+              ) : null}
+            </div>
+            <div className="modal__footer">
+              <button
+                type="button"
+                className="btn btn--secondary"
+                onClick={() => setSendEmailModalOpen(false)}
+              >
+                Cancel
+              </button>
+              <button
+                type="submit"
+                className="btn btn--primary"
+                data-testid="quote-send-email-submit-btn"
+                disabled={pending}
+              >
+                {emailProviderDisabled ? 'Queue quote email' : 'Send quote email'}
+              </button>
+            </div>
+          </form>
+        </div>
+      ) : null}
+
+      {/* MODAL: RECORD AS SENT OFFLINE */}
+      {offlineModalOpen ? (
+        <div
+          className="modal-backdrop"
+          role="dialog"
+          aria-modal="true"
+          aria-label="Record quote as sent offline"
+        >
+          <form
+            className="modal"
+            onSubmit={handleMarkSentOfflineSubmit}
+            style={{ maxWidth: 460 }}
+          >
+            <div className="modal__header">
+              <h2>Record quote as sent offline</h2>
+              <button
+                type="button"
+                className="btn btn--ghost btn--sm"
+                onClick={() => setOfflineModalOpen(false)}
+              >
+                ✕
+              </button>
+            </div>
+            <div className="modal__body" style={{ display: 'flex', flexDirection: 'column', gap: 12 }}>
+              <p className="muted" style={{ fontSize: 13, margin: 0 }}>
+                Use this when you posted, handed over, or emailed the quote outside this system.
+                No email will be sent and automated email chasing will not run.
+              </p>
+              <div className="field">
+                <label className="field-label" htmlFor="qoff-date">
+                  Date sent *
+                </label>
+                <input
+                  id="qoff-date"
+                  type="date"
+                  className="field-input"
+                  required
+                  value={offlineSentDate}
+                  onChange={(e) => setOfflineSentDate(e.target.value)}
+                />
+              </div>
+              <div className="field">
+                <label className="field-label" htmlFor="qoff-note">
+                  Dispatch note (optional)
+                </label>
+                <textarea
+                  id="qoff-note"
+                  data-testid="quote-mark-offline-note-input"
+                  className="field-input"
+                  rows={2}
+                  placeholder="e.g. Sent by signed post or handed to client in meeting"
+                  value={offlineNote}
+                  onChange={(e) => setOfflineNote(e.target.value)}
+                />
+              </div>
+            </div>
+            <div className="modal__footer">
+              <button
+                type="button"
+                className="btn btn--secondary"
+                onClick={() => setOfflineModalOpen(false)}
+              >
+                Cancel
+              </button>
+              <button
+                type="submit"
+                className="btn btn--primary"
+                data-testid="quote-mark-offline-submit-btn"
+                disabled={pending}
+              >
+                Record offline dispatch
               </button>
             </div>
           </form>
