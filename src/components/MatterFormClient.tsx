@@ -85,6 +85,8 @@ import {
   RELATIONSHIP_SORT_ORDER,
 } from '@/domain/matterParties';
 import {
+  formatMinorUnitsGbp,
+  poundsToMinorUnits,
   resolveEffectiveFeeCaps,
   type GradeRateResolution,
   type MatterRateOverrideRecord,
@@ -5606,10 +5608,9 @@ export function MatterFormClient({
                     initialQuote.paymentOnAccountPence != null) ? (
                     <div data-testid="matter-quote-poa-carryover">
                       <strong>Payment on Account carried over:</strong>{' '}
-                      {formatGbp(
-                        initialQuote.paymentOnAccountGbp ??
-                          Number(initialQuote.paymentOnAccountPence ?? 0) / 100,
-                        true,
+                      {formatMinorUnitsGbp(
+                        initialQuote.paymentOnAccountPence ??
+                          poundsToMinorUnits(initialQuote.paymentOnAccountGbp ?? 0),
                       )}
                     </div>
                   ) : null}

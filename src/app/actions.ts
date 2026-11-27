@@ -85,7 +85,6 @@ import {
   markAllNotificationsRead,
   markNotificationRead,
   markQuoteSentOfflineRecord,
-  markQuoteSentRecord,
   openProspectiveMatterRecord,
   overrideMatterOpeningPreconditionRecord,
   prepareEnquiryConversion,
@@ -1215,16 +1214,6 @@ export async function saveQuoteAction(
   });
 }
 
-export async function markQuoteSentAction(quoteId: string) {
-  return guardedAction('markQuoteSentAction', async (actor) => {
-    const res = await markQuoteSentRecord(quoteId, actor.personId, {
-      tenantCtx: actor.tenantContext,
-    });
-    revalidateAll();
-    return res;
-  });
-}
-
 export async function sendQuoteEmailAction(input: {
   quoteId: string;
   recipientEmail?: string;
@@ -1319,8 +1308,10 @@ export async function recordQuoteOutcomeAction(
     note?: string;
   },
 ) {
-  return guardedAction('recordQuoteOutcomeAction', async ({ personId: byId }) => {
-    const res = await recordQuoteOutcomeRecord(quoteId, input, byId);
+  return guardedAction('recordQuoteOutcomeAction', async (actor) => {
+    const res = await recordQuoteOutcomeRecord(quoteId, input, actor.personId, {
+      tenantCtx: actor.tenantContext,
+    });
     revalidateAll();
     return res;
   });

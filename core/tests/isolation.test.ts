@@ -180,7 +180,7 @@ import {
   linkPmsRecordAction,
   logEnquiryContactAction,
   logQuoteFollowUpAction,
-  markQuoteSentAction,
+  markQuoteSentOfflineAction,
   mergeRecordsAction,
   prepareEnquiryConversionAction,
   prepareQuoteConversionAction,
@@ -7763,7 +7763,7 @@ describe('Platform Architecture Standard — Two-Tenant Isolation & Contract Tes
             feeBasis: 'Fixed fee',
             feeAmountExVat: 1000,
           }),
-        () => markQuoteSentAction(tamperedIds.quote),
+        () => markQuoteSentOfflineAction({ quoteId: tamperedIds.quote }),
         () =>
           logQuoteFollowUpAction(tamperedIds.quote, {
             method: 'Phone',
@@ -7932,7 +7932,14 @@ describe('Platform Architecture Standard — Two-Tenant Isolation & Contract Tes
         ),
         'Quote not found.',
       );
-      expectTamperedForbidden(await markQuoteSentAction(tamperedIds.quote), 'Quote not found.');
+      const offlineTampered = await markQuoteSentOfflineAction({
+        quoteId: tamperedIds.quote,
+      });
+      expect(offlineTampered).toMatchObject({
+        ok: false,
+        code: 'NOT_FOUND',
+        message: 'Quote not found.',
+      });
       expectTamperedForbidden(
         await logQuoteFollowUpAction(tamperedIds.quote, {
           method: 'Phone',
@@ -8236,7 +8243,9 @@ describe('Platform Architecture Standard — Two-Tenant Isolation & Contract Tes
         )?.scope,
       ).toBe('Tenant A valid quote scope updated by ID');
 
-      const validQuoteSent = await markQuoteSentAction(validQuoteId);
+      const validQuoteSent = await markQuoteSentOfflineAction({
+        quoteId: validQuoteId,
+      });
       expect(isActionDenied(validQuoteSent)).toBe(false);
       expect(
         (

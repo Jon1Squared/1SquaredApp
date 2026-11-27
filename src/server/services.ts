@@ -21784,11 +21784,14 @@ export async function sendQuoteEmailRecord(
     const effectiveStatus = evaluateQuoteEffectiveStatus(quotePre, now);
     if (
       QUOTE_TERMINAL_STATUSES.has(quotePre.status) ||
-      QUOTE_TERMINAL_STATUSES.has(effectiveStatus)
+      QUOTE_TERMINAL_STATUSES.has(effectiveStatus) ||
+      Boolean(quotePre.convertedMatterId)
     ) {
       return registerServiceFailure(
         'VALIDATION_ERROR',
-        `Quote ${quotePre.reference} cannot be sent because its status is ${effectiveStatus}. Revise the quote to create a new version first.`,
+        quotePre.convertedMatterId
+          ? `Quote ${quotePre.reference} has already been converted to a matter and cannot be sent.`
+          : `Quote ${quotePre.reference} cannot be sent because its status is ${effectiveStatus}. Revise the quote to create a new version first.`,
       );
     }
 
@@ -21967,11 +21970,23 @@ export async function sendQuoteEmailRecord(
       );
       if (
         QUOTE_TERMINAL_STATUSES.has(lockedQuote.status) ||
-        QUOTE_TERMINAL_STATUSES.has(lockedEffective)
+        QUOTE_TERMINAL_STATUSES.has(lockedEffective) ||
+        Boolean(lockedQuote.convertedMatterId)
       ) {
         return registerServiceFailure(
           'VALIDATION_ERROR',
-          `Quote ${lockedQuote.reference} cannot be sent because its status is ${lockedEffective}. Revise the quote to create a new version first.`,
+          lockedQuote.convertedMatterId
+            ? `Quote ${lockedQuote.reference} has already been converted to a matter and cannot be sent.`
+            : `Quote ${lockedQuote.reference} cannot be sent because its status is ${lockedEffective}. Revise the quote to create a new version first.`,
+        );
+      }
+      if (
+        lockedQuote.version !== quotePre.version ||
+        lockedQuote.updatedAt !== quotePre.updatedAt
+      ) {
+        return registerServiceFailure(
+          'CONFLICT',
+          'The quote changed while sending; please try again.',
         );
       }
 
@@ -22142,11 +22157,14 @@ export async function markQuoteSentOfflineRecord(
       );
       if (
         QUOTE_TERMINAL_STATUSES.has(lockedQuote.status) ||
-        QUOTE_TERMINAL_STATUSES.has(effectiveStatus)
+        QUOTE_TERMINAL_STATUSES.has(effectiveStatus) ||
+        Boolean(lockedQuote.convertedMatterId)
       ) {
         return registerServiceFailure(
           'VALIDATION_ERROR',
-          `Quote ${lockedQuote.reference} cannot be marked as sent because its status is ${effectiveStatus}.`,
+          lockedQuote.convertedMatterId
+            ? `Quote ${lockedQuote.reference} has already been converted to a matter and cannot be marked as sent.`
+            : `Quote ${lockedQuote.reference} cannot be marked as sent because its status is ${effectiveStatus}.`,
         );
       }
 
@@ -22314,6 +22332,7 @@ export async function saveQuoteRecord(
       | ActionDenialCode
       | FeeCapErrorCode
       | 'VALIDATION_ERROR'
+      | 'CONFLICT'
       | 'EMAIL_ATTACHMENT_SIZE_LIMIT_EXCEEDED';
   }
 > {
@@ -22414,6 +22433,21 @@ export async function saveQuoteRecord(
   if (opts.id && (!existing || !visibility.canViewQuote(existing))) {
     const msg = 'Quote not found.';
     return { ...buildActionDenied('FORBIDDEN', msg), error: msg };
+  }
+  if (existing) {
+    const effectivePre = evaluateQuoteEffectiveStatus(existing, now);
+    if (
+      QUOTE_TERMINAL_STATUSES.has(existing.status) ||
+      QUOTE_TERMINAL_STATUSES.has(effectivePre) ||
+      Boolean(existing.convertedMatterId)
+    ) {
+      return {
+        code: 'VALIDATION_ERROR',
+        error: existing.convertedMatterId
+          ? `Quote ${existing.reference} cannot be edited or sent because it has already been converted to a matter.`
+          : `Quote ${existing.reference} cannot be sent because its status is ${effectivePre}. Revise the quote to create a new version first.`,
+      };
+    }
   }
 
   const clientType = input.clientType || 'prospect';
@@ -23246,6 +23280,29 @@ export async function saveQuoteRecord(
       }
     }
 
+    const lockedEffective = evaluateQuoteEffectiveStatus(lockedExisting, now);
+    if (
+      QUOTE_TERMINAL_STATUSES.has(lockedExisting.status) ||
+      QUOTE_TERMINAL_STATUSES.has(lockedEffective) ||
+      Boolean(lockedExisting.convertedMatterId)
+    ) {
+      return {
+        code: 'VALIDATION_ERROR' as const,
+        error: lockedExisting.convertedMatterId
+          ? `Quote ${lockedExisting.reference} cannot be edited or sent because it has already been converted to a matter.`
+          : `Quote ${lockedExisting.reference} cannot be sent because its status is ${lockedEffective}. Revise the quote to create a new version first.`,
+      };
+    }
+    if (
+      lockedExisting.version !== existing.version ||
+      lockedExisting.updatedAt !== existing.updatedAt
+    ) {
+      return {
+        code: 'CONFLICT' as const,
+        error: 'The quote changed while saving; please try again.',
+      };
+    }
+
     lockedExisting.clientType = previewUpdatedQuote.clientType;
     lockedExisting.linkedOrganisationId = previewUpdatedQuote.linkedOrganisationId;
     lockedExisting.linkedPersonId = previewUpdatedQuote.linkedPersonId;
@@ -23354,15 +23411,59 @@ export async function saveQuoteRecord(
             : `v${lockedExisting.version} marked as sent`,
         detail: `Follow-up scheduled for ${lockedExisting.nextFollowUpDate}`,
       });
-      await intakeRepo.putQuote(ctx, lockedExisting);
+      const stoppedChase = await chasingRepo.stopActiveChaseInTx(tx, ctx, {
+        entityKind: 'quote',
+        entityId: lockedExisting.id,
+        reason: 'superseded',
+        stoppedByPersonId: opts.byId,
+        stoppedAt: nowIso,
+      });
+      if (stoppedChase) {
+        await appendTenantAuditEntries(ctx, [
+          {
+            recordType: 'communication_chase',
+            recordId: stoppedChase.id,
+            action: 'update',
+            field: 'Communication chase stopped',
+            oldValue: stoppedChase.previousStatus,
+            newValue: `stopped (${stoppedChase.stoppedReason ?? 'superseded'})`,
+            byId: opts.byId,
+            at: nowIso,
+          },
+        ]);
+      }
+      await intakeRepo.upsertQuoteInTx(tx, ctx, lockedExisting);
     } else {
       if (customTransparencyNote !== undefined) {
         lockedExisting.priceTransparencySnapshot = draftTransparencySnapshot;
       }
-      applyQuoteEffectiveLifecycle(lockedExisting, now, {
+      const lifecycle = applyQuoteEffectiveLifecycle(lockedExisting, now, {
         appendExpiredTimeline: true,
       });
-      await intakeRepo.putQuote(ctx, lockedExisting);
+      if (lifecycle.newlyExpired || lockedExisting.status === 'Expired') {
+        const stoppedChase = await chasingRepo.stopActiveChaseInTx(tx, ctx, {
+          entityKind: 'quote',
+          entityId: lockedExisting.id,
+          reason: 'expired',
+          stoppedByPersonId: opts.byId,
+          stoppedAt: nowIso,
+        });
+        if (stoppedChase) {
+          await appendTenantAuditEntries(ctx, [
+            {
+              recordType: 'communication_chase',
+              recordId: stoppedChase.id,
+              action: 'update',
+              field: 'Communication chase stopped',
+              oldValue: stoppedChase.previousStatus,
+              newValue: `stopped (${stoppedChase.stoppedReason ?? 'expired'})`,
+              byId: opts.byId,
+              at: nowIso,
+            },
+          ]);
+        }
+      }
+      await intakeRepo.upsertQuoteInTx(tx, ctx, lockedExisting);
     }
 
     writeAudit(null, {
@@ -23500,96 +23601,6 @@ async function loadScopedQuoteForEdit(
   return { ok: true, quote };
 }
 
-export async function markQuoteSentRecord(
-  quoteId: string,
-  byId: string,
-  options?: {
-    readonly tenantCtx?: TenantContext | null;
-    readonly tenantConfig?: TenantConfiguration;
-    readonly pdfConverter?: DocumentPdfConverter;
-    readonly emailSender?: EmailSender;
-    readonly secretReader?: KeyVaultSecretReader;
-    readonly storageProvider?: DocumentStorageProvider;
-    readonly drainAfterCommit?: boolean;
-  },
-): Promise<
-  {
-    quote?: Quote;
-    outboxRecord?: EmailOutboxRecord;
-    chase?: CommunicationChaseRecord | null;
-    emailProviderDisabled?: boolean;
-    earlyReturn?: boolean;
-    error?: string;
-  } & Partial<ActionDenied>
-> {
-  return runWithAuditStagingScope(async () => {
-  const ctx = resolveDefaultServiceTenantContext(null, byId, {
-    tenantCtx: options?.tenantCtx,
-  });
-  const intakeRepo = getIntakeQuoteRepository();
-  const partyRepo = getPartyRepository();
-  const scoped = await loadScopedQuoteForEdit(
-    ctx,
-    byId,
-    quoteId,
-    'You do not have permission (quote:edit) to mark a quote as sent.',
-  );
-  if (!scoped.ok) return scoped.denied;
-  const { quote } = scoped;
-
-  const [linkedPerson, linkedOrg, linkedEnq] = await Promise.all([
-    quote.linkedPersonId
-      ? partyRepo.getPersonById<Person>(ctx, quote.linkedPersonId)
-      : Promise.resolve(null),
-    quote.linkedOrganisationId
-      ? partyRepo.getOrganisationById<Organisation>(
-          ctx,
-          quote.linkedOrganisationId,
-        )
-      : Promise.resolve(null),
-    quote.linkedEnquiryId
-      ? intakeRepo.getEnquiryById<Enquiry>(ctx, quote.linkedEnquiryId, {
-          includeRestricted: true,
-        })
-      : Promise.resolve(null),
-  ]);
-  const { recipientEmail } = resolveQuoteRecipientFromRelated({
-    quoteProspectEmail: quote.prospectEmail,
-    quoteProspectName: quote.prospectName,
-    linkedPerson,
-    linkedOrg,
-    linkedEnquiry: linkedEnq,
-  });
-  if (recipientEmail && isValidEmailAddress(recipientEmail)) {
-    const emailRes = await sendQuoteEmailRecord(
-      { quoteId: quote.id, recipientEmail },
-      byId,
-      options,
-    );
-    if (!emailRes.ok) {
-      return emailRes as { error?: string } & Partial<ActionDenied>;
-    }
-    return {
-      quote: emailRes.quote,
-      outboxRecord: emailRes.outboxRecord,
-      chase: emailRes.chase,
-      emailProviderDisabled: emailRes.emailProviderDisabled,
-      earlyReturn: emailRes.earlyReturn,
-    };
-  }
-
-  const offlineRes = await markQuoteSentOfflineRecord(
-    { quoteId: quote.id },
-    byId,
-    options,
-  );
-  if (!offlineRes.ok) {
-    return offlineRes as { error?: string } & Partial<ActionDenied>;
-  }
-  return { quote: offlineRes.quote };
-  });
-}
-
 export async function logQuoteFollowUpRecord(
   quoteId: string,
   input: {
@@ -23602,6 +23613,7 @@ export async function logQuoteFollowUpRecord(
   return runWithAuditStagingScope(async () => {
   const ctx = resolveDefaultServiceTenantContext(null, byId);
   const intakeRepo = getIntakeQuoteRepository();
+  const chasingRepo = getChasingRepository();
   const scoped = await loadScopedQuoteForEdit(
     ctx,
     byId,
@@ -23614,44 +23626,83 @@ export async function logQuoteFollowUpRecord(
     return { error: 'Please enter a follow-up note.' };
   }
 
-  const now = new Date();
-  const nowIso = now.toISOString();
-  const todayYmd = toIsoDate(now);
-  const nextDate = input.nextFollowUpDate || toIsoDate(addDays(now, quote.followUpAfterDays || 7));
+  const txResult = await intakeRepo.withTenantTransaction(ctx, async (tx) => {
+    const lockedQuote = await intakeRepo.getQuoteByIdForUpdateInTx<Quote>(
+      tx,
+      ctx,
+      quote.id,
+      { includeRestricted: true },
+    );
+    if (!lockedQuote) {
+      return {
+        ...buildActionDenied('FORBIDDEN', 'Quote not found.'),
+        error: 'Quote not found.',
+      };
+    }
 
-  quote.followUps.unshift({
-    id: `QFU-${Date.now()}`,
-    at: nowIso,
-    method: input.method,
-    note: input.note.trim(),
-    nextFollowUpDate: nextDate,
-    byId,
-  });
+    const now = new Date();
+    const nowIso = nextMonotonicIsoTimestamp(lockedQuote.updatedAt);
+    const todayYmd = toIsoDate(now);
+    const nextDate =
+      input.nextFollowUpDate ||
+      toIsoDate(addDays(now, lockedQuote.followUpAfterDays || 7));
 
-  quote.nextFollowUpDate = nextDate;
-  if (quote.status === 'Follow-up due' && nextDate > todayYmd) {
-    quote.status = 'Sent';
-  }
-  applyQuoteEffectiveLifecycle(quote, now, {
-    appendExpiredTimeline: true,
-  });
-  quote.updatedAt = nowIso;
-  quote.updatedById = byId;
+    lockedQuote.followUps.unshift({
+      id: `QFU-${Date.now()}`,
+      at: nowIso,
+      method: input.method,
+      note: input.note.trim(),
+      nextFollowUpDate: nextDate,
+      byId,
+    });
 
-  quote.timeline.push({
-    id: `QT-${Date.now()}`,
-    kind: 'follow_up',
-    at: nowIso,
-    byId,
-    title: `Follow-up logged (${input.method})`,
-    detail: `${input.note.trim()}${nextDate ? ` · Next follow-up: ${nextDate}` : ''}`,
-  });
+    lockedQuote.nextFollowUpDate = nextDate;
+    if (lockedQuote.status === 'Follow-up due' && nextDate > todayYmd) {
+      lockedQuote.status = 'Sent';
+    }
+    const lifecycle = applyQuoteEffectiveLifecycle(lockedQuote, now, {
+      appendExpiredTimeline: true,
+    });
+    lockedQuote.updatedAt = nowIso;
+    lockedQuote.updatedById = byId;
 
-  await intakeRepo.withTenantTransaction(ctx, async () => {
-    await intakeRepo.putQuote(ctx, quote);
+    lockedQuote.timeline.push({
+      id: `QT-${Date.now()}`,
+      kind: 'follow_up',
+      at: nowIso,
+      byId,
+      title: `Follow-up logged (${input.method})`,
+      detail: `${input.note.trim()}${nextDate ? ` · Next follow-up: ${nextDate}` : ''}`,
+    });
+
+    if (lifecycle.newlyExpired || lockedQuote.status === 'Expired') {
+      const stoppedChase = await chasingRepo.stopActiveChaseInTx(tx, ctx, {
+        entityKind: 'quote',
+        entityId: lockedQuote.id,
+        reason: 'expired',
+        stoppedByPersonId: byId,
+        stoppedAt: nowIso,
+      });
+      if (stoppedChase) {
+        await appendTenantAuditEntries(ctx, [
+          {
+            recordType: 'communication_chase',
+            recordId: stoppedChase.id,
+            action: 'update',
+            field: 'Communication chase stopped',
+            oldValue: stoppedChase.previousStatus,
+            newValue: `stopped (${stoppedChase.stoppedReason ?? 'expired'})`,
+            byId,
+            at: nowIso,
+          },
+        ]);
+      }
+    }
+
+    await intakeRepo.upsertQuoteInTx(tx, ctx, lockedQuote);
     writeAudit(null, {
       recordType: 'quote',
-      recordId: quote.id,
+      recordId: lockedQuote.id,
       action: 'contact-log',
       field: `Quote follow-up (${input.method})`,
       oldValue: null,
@@ -23660,9 +23711,10 @@ export async function logQuoteFollowUpRecord(
       at: nowIso,
     });
     await flushStagedAuditEntries(ctx);
+    return { quote: lockedQuote };
   });
 
-  return { quote };
+  return txResult;
   });
 }
 
@@ -23719,6 +23771,7 @@ export async function reviseQuoteRecord(
       | ActionDenialCode
       | FeeCapErrorCode
       | 'VALIDATION_ERROR'
+      | 'CONFLICT'
       | 'EMAIL_ATTACHMENT_SIZE_LIMIT_EXCEEDED';
   }
 > {
@@ -23745,6 +23798,19 @@ export async function reviseQuoteRecord(
 
   const now = new Date();
   const nowIso = now.toISOString();
+  const effectivePre = evaluateQuoteEffectiveStatus(quote, now);
+  if (
+    QUOTE_TERMINAL_STATUSES.has(quote.status) ||
+    QUOTE_TERMINAL_STATUSES.has(effectivePre) ||
+    Boolean(quote.convertedMatterId)
+  ) {
+    return {
+      code: 'VALIDATION_ERROR',
+      error: quote.convertedMatterId
+        ? `Quote ${quote.reference} cannot be revised because it has already been converted to a matter.`
+        : `Quote ${quote.reference} cannot be revised because its status is ${effectivePre}.`,
+    };
+  }
 
   if (!Number.isFinite(Number(input.feeAmountExVat)) || Number(input.feeAmountExVat) < 0) {
     return { error: 'Fee amount must be a non-negative number.' };
@@ -24108,6 +24174,29 @@ export async function reviseQuoteRecord(
       }
     }
 
+    const lockedEffective = evaluateQuoteEffectiveStatus(lockedQuote, now);
+    if (
+      QUOTE_TERMINAL_STATUSES.has(lockedQuote.status) ||
+      QUOTE_TERMINAL_STATUSES.has(lockedEffective) ||
+      Boolean(lockedQuote.convertedMatterId)
+    ) {
+      return {
+        code: 'VALIDATION_ERROR' as const,
+        error: lockedQuote.convertedMatterId
+          ? `Quote ${lockedQuote.reference} cannot be revised because it has already been converted to a matter.`
+          : `Quote ${lockedQuote.reference} cannot be revised because its status is ${lockedEffective}.`,
+      };
+    }
+    if (
+      lockedQuote.version !== quote.version ||
+      lockedQuote.updatedAt !== quote.updatedAt
+    ) {
+      return {
+        code: 'CONFLICT' as const,
+        error: 'The quote changed while revising; please try again.',
+      };
+    }
+
     const lockedPriorVat =
       typeof lockedQuote.vatRatePercent === 'number' &&
       Number.isFinite(lockedQuote.vatRatePercent)
@@ -24416,9 +24505,14 @@ export async function recordQuoteOutcomeRecord(
     note?: string;
   },
   byId: string,
+  options?: {
+    readonly tenantCtx?: TenantContext | null;
+  },
 ): Promise<{ quote?: Quote; error?: string } & Partial<ActionDenied>> {
   return runWithAuditStagingScope(async () => {
-  const ctx = resolveDefaultServiceTenantContext(null, byId);
+  const ctx = resolveDefaultServiceTenantContext(null, byId, {
+    tenantCtx: options?.tenantCtx,
+  });
   const intakeRepo = getIntakeQuoteRepository();
   const scoped = await loadScopedQuoteForEdit(
     ctx,
@@ -24438,48 +24532,61 @@ export async function recordQuoteOutcomeRecord(
     }
   }
 
-  const nowIso = new Date().toISOString();
-  const prevStatus = quote.status;
-  quote.status = input.outcome;
-  quote.outcomeAt = nowIso;
-  quote.nextFollowUpDate = null;
-  quote.updatedAt = nowIso;
-  quote.updatedById = byId;
+  const outcomeRes = await intakeRepo.withTenantTransaction(ctx, async (tx) => {
+    const lockedQuote = await intakeRepo.getQuoteByIdForUpdateInTx<Quote>(
+      tx,
+      ctx,
+      quote.id,
+      { includeRestricted: true },
+    );
+    if (!lockedQuote) {
+      return {
+        ...buildActionDenied('FORBIDDEN', 'Quote not found.'),
+        error: 'Quote not found.',
+      };
+    }
 
-  if (input.outcome === 'Accepted') {
-    quote.outcomeNote = input.note?.trim() || undefined;
-    quote.declineReason = null;
-    quote.declineNote = undefined;
-    quote.timeline.push({
-      id: `QT-${Date.now()}`,
-      kind: 'accepted',
-      at: nowIso,
-      byId,
-      title: 'Outcome recorded: Accepted',
-      detail: input.note?.trim() || 'Client accepted the quote.',
-    });
-  } else {
-    quote.declineReason = input.declineReason!;
-    quote.declineNote = input.note?.trim() || undefined;
-    quote.timeline.push({
-      id: `QT-${Date.now()}`,
-      kind: 'declined',
-      at: nowIso,
-      byId,
-      title: `Outcome recorded: Declined (${input.declineReason})`,
-      detail: input.note?.trim() || undefined,
-    });
-  }
+    const nowIso = nextMonotonicIsoTimestamp(lockedQuote.updatedAt);
+    const prevStatus = lockedQuote.status;
+    lockedQuote.status = input.outcome;
+    lockedQuote.outcomeAt = nowIso;
+    lockedQuote.nextFollowUpDate = null;
+    lockedQuote.updatedAt = nowIso;
+    lockedQuote.updatedById = byId;
 
-  await intakeRepo.withTenantTransaction(ctx, async (tx) => {
-    await intakeRepo.upsertQuoteInTx(tx, ctx, quote);
+    if (input.outcome === 'Accepted') {
+      lockedQuote.outcomeNote = input.note?.trim() || undefined;
+      lockedQuote.declineReason = null;
+      lockedQuote.declineNote = undefined;
+      lockedQuote.timeline.push({
+        id: `QT-${Date.now()}`,
+        kind: 'accepted',
+        at: nowIso,
+        byId,
+        title: 'Outcome recorded: Accepted',
+        detail: input.note?.trim() || 'Client accepted the quote.',
+      });
+    } else {
+      lockedQuote.declineReason = input.declineReason!;
+      lockedQuote.declineNote = input.note?.trim() || undefined;
+      lockedQuote.timeline.push({
+        id: `QT-${Date.now()}`,
+        kind: 'declined',
+        at: nowIso,
+        byId,
+        title: `Outcome recorded: Declined (${input.declineReason})`,
+        detail: input.note?.trim() || undefined,
+      });
+    }
+
+    await intakeRepo.upsertQuoteInTx(tx, ctx, lockedQuote);
     const stopReason = input.outcome === 'Accepted' ? 'accepted' : 'declined';
     const stoppedChase = await getChasingRepository().stopActiveChaseInTx(
       tx,
       ctx,
       {
         entityKind: 'quote',
-        entityId: quote.id,
+        entityId: lockedQuote.id,
         reason: stopReason,
         stoppedByPersonId: byId,
         stoppedAt: nowIso,
@@ -24501,7 +24608,7 @@ export async function recordQuoteOutcomeRecord(
     }
     writeAudit(null, {
       recordType: 'quote',
-      recordId: quote.id,
+      recordId: lockedQuote.id,
       action: 'status-change',
       field: 'Quote outcome',
       oldValue: prevStatus,
@@ -24513,9 +24620,10 @@ export async function recordQuoteOutcomeRecord(
       at: nowIso,
     });
     await flushStagedAuditEntries(ctx);
+    return { quote: lockedQuote };
   });
 
-  return { quote };
+  return outcomeRes;
   });
 }
 
@@ -42242,6 +42350,7 @@ const QUOTE_CHASE_ADAPTER: CommunicationChaseAdapter<Quote> = {
     await intakeRepo.upsertQuoteInTx(tx, ctx, lockedQuote);
   },
   async escalationCandidates({
+    tx,
     ctx,
     rule,
     subject: quote,
@@ -42249,6 +42358,7 @@ const QUOTE_CHASE_ADAPTER: CommunicationChaseAdapter<Quote> = {
     teams,
     rbacConfig,
   }) {
+    const intakeRepo = getIntakeQuoteRepository();
     const [convertedMatter, linkedEnq] = await Promise.all([
       quote.convertedMatterId
         ? getMatterRepository().getMatterById<Matter>(
@@ -42258,7 +42368,7 @@ const QUOTE_CHASE_ADAPTER: CommunicationChaseAdapter<Quote> = {
           )
         : Promise.resolve(null),
       quote.linkedEnquiryId
-        ? getIntakeQuoteRepository().getEnquiryById<Enquiry>(
+        ? intakeRepo.getEnquiryById<Enquiry>(
             ctx,
             quote.linkedEnquiryId,
             { includeRestricted: true },
@@ -42279,6 +42389,45 @@ const QUOTE_CHASE_ADAPTER: CommunicationChaseAdapter<Quote> = {
       ...(owningTeam?.leadIds ?? []),
     ].filter((id): id is string => Boolean(id?.trim()));
 
+    const eligibleCandidateIds = new Set<string>();
+    const checkedIds = new Set<string>();
+    for (const candidateId of orderedPersonIds) {
+      if (checkedIds.has(candidateId)) continue;
+      checkedIds.add(candidateId);
+      const candidate = people.find((p) => p.id === candidateId);
+      if (!candidate || candidate.mergedIntoId || !candidate.isEmployee) {
+        continue;
+      }
+      if (
+        !hasPersonPermission(candidate, 'quote:view', {
+          allPeople: people,
+          teams,
+          config: { rbac: rbacConfig },
+        })
+      ) {
+        continue;
+      }
+      const hasRestrictedMatterAccess = hasPersonPermission(
+        candidate,
+        'matter:restricted:access',
+        {
+          allPeople: people,
+          teams,
+          config: { rbac: rbacConfig },
+        },
+      );
+      const isHidden = await intakeRepo.isQuoteHiddenFromViewerInTx(
+        tx,
+        ctx,
+        quote.id,
+        candidate.id,
+        { hasRestrictedMatterAccess },
+      );
+      if (!isHidden) {
+        eligibleCandidateIds.add(candidate.id);
+      }
+    }
+
     const linkedRecords: Task['linkedRecords'] = [
       { recordType: 'quote', recordId: quote.id },
       ...(convertedMatter
@@ -42291,35 +42440,7 @@ const QUOTE_CHASE_ADAPTER: CommunicationChaseAdapter<Quote> = {
 
     return {
       orderedPersonIds,
-      canPersonAccessSubject: (candidate) => {
-        if (
-          !hasPersonPermission(candidate, 'quote:view', {
-            allPeople: people,
-            teams,
-            config: { rbac: rbacConfig },
-          })
-        ) {
-          return false;
-        }
-        if (
-          convertedMatter &&
-          !canPersonAccessMatter(convertedMatter, candidate.id, candidate, {
-            allPeople: people,
-            teams,
-            config: { rbac: rbacConfig },
-          })
-        ) {
-          return false;
-        }
-        if (
-          linkedEnq?.status === 'Draft' &&
-          linkedEnq.createdById !== candidate.id &&
-          linkedEnq.takenById !== candidate.id
-        ) {
-          return false;
-        }
-        return true;
-      },
+      canPersonAccessSubject: (candidate) => eligibleCandidateIds.has(candidate.id),
       taskTitle: `Follow up open quote: ${quote.reference} (v${quote.version})`,
       taskDescription: `No outcome has been recorded for quote ${quote.reference} after ${rule.escalateTaskDays} days. Please follow up with the prospect or client.`,
       failureTaskTitle: `Follow up failed quote chase: ${quote.reference}`,

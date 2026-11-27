@@ -274,4 +274,44 @@ describe('quotes domain & PDF generation (S1-07)', () => {
       expect(bigRes.code).toBe('EMAIL_ATTACHMENT_SIZE_LIMIT_EXCEEDED');
     }
   });
+
+  it('rejects exponent-form, non-finite, and >2dp POA inputs strictly while preserving valid 2dp values (R862)', () => {
+    for (const bad of [
+      '1e3',
+      '1E-2',
+      1e-7,
+      1e21,
+      Number.NaN,
+      Number.POSITIVE_INFINITY,
+      Number.NEGATIVE_INFINITY,
+      '10.125',
+      10.125,
+      '500.001',
+    ]) {
+      const res = validateAndNormalizeQuotePoa({
+        paymentOnAccountRequired: true,
+        paymentOnAccountGbp: bad,
+      });
+      expect(res.ok, `Expected rejection for ${String(bad)}`).toBe(false);
+    }
+
+    for (const [inputVal, expectedPence, expectedGbp] of [
+      ['500', 50000, 500],
+      ['500.5', 50050, 500.5],
+      ['500.50', 50050, 500.5],
+      [0.01, 1, 0.01],
+      [1234.56, 123456, 1234.56],
+    ] as const) {
+      const res = validateAndNormalizeQuotePoa({
+        paymentOnAccountRequired: true,
+        paymentOnAccountGbp: inputVal,
+      });
+      expect(res).toEqual({
+        ok: true,
+        paymentOnAccountRequired: true,
+        paymentOnAccountPence: expectedPence,
+        paymentOnAccountGbp: expectedGbp,
+      });
+    }
+  });
 });

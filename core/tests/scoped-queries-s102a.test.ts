@@ -28,7 +28,7 @@ import {
   getClientPmsViewBundle,
   loadFullConflictSearchGraph,
   loadScopedConflictSearchGraphForParity,
-  markQuoteSentRecord,
+  markQuoteSentOfflineRecord,
   runMatterConflictSearchRecord,
   findCandidateDuplicatesForRecord,
 } from '@/server/services';
@@ -499,8 +499,14 @@ describe('S1-02a B15: SQL-scoped repositories, Draft privacy, candidate parity, 
     );
     expect('code' in crossTenantOrgRes && crossTenantOrgRes.code).toBe('FORBIDDEN');
 
-    const crossQuoteRes = await markQuoteSentRecord('QT-NONEXISTENT-999', 'P-000001');
-    expect(crossQuoteRes.code).toBe('FORBIDDEN');
+    const crossQuoteRes = await markQuoteSentOfflineRecord(
+      { quoteId: 'QT-NONEXISTENT-999' },
+      'P-000001',
+    );
+    expect(crossQuoteRes.ok).toBe(false);
+    if (!crossQuoteRes.ok) {
+      expect(crossQuoteRes.code).toBe('NOT_FOUND');
+    }
 
     const forgedCtx = {
       ...ctxBravo,

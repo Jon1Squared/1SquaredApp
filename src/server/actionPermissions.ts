@@ -630,11 +630,6 @@ export const ACTION_PERMISSIONS = {
     key: 'quote:edit',
     enforcedBy: 'action',
   },
-  markQuoteSentAction: {
-    kind: 'permission',
-    key: 'quote:edit',
-    enforcedBy: 'action',
-  },
   sendQuoteEmailAction: {
     kind: 'permission',
     key: 'quote:edit',

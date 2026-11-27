@@ -2035,17 +2035,7 @@ export class TenantIntakeQuoteRepository extends TenantScopedRepository {
           'Payment on account pence must be a safe integer.',
         );
       }
-      if (
-        quote.paymentOnAccountGbp !== undefined &&
-        quote.paymentOnAccountGbp !== null &&
-        Number.isFinite(Number(quote.paymentOnAccountGbp)) &&
-        minorUnitsToPounds(quote.paymentOnAccountPence) !==
-          Number(quote.paymentOnAccountGbp)
-      ) {
-        poaPence = poundsToMinorUnits(Number(quote.paymentOnAccountGbp));
-      } else {
-        poaPence = quote.paymentOnAccountPence;
-      }
+      poaPence = quote.paymentOnAccountPence;
     } else if (
       quote.paymentOnAccountPence === undefined &&
       quote.paymentOnAccountGbp !== undefined &&
@@ -3508,6 +3498,28 @@ export class TenantIntakeQuoteRepository extends TenantScopedRepository {
     });
   }
 
+  public async isQuoteHiddenFromViewerInTx(
+    tx: TenantSqlClient,
+    ctx: TenantContext,
+    quoteId: string,
+    viewerId: string,
+    options?: { hasRestrictedMatterAccess?: boolean },
+  ): Promise<boolean> {
+    const cleanId = quoteId?.trim();
+    if (!cleanId) return false;
+    const pred = options?.hasRestrictedMatterAccess
+      ? QUOTE_DRAFT_ONLY_SQL_PREDICATE
+      : QUOTE_VISIBLE_SQL_PREDICATE;
+    const res = await tx.query<{ is_hidden: boolean }>(
+      `SELECT EXISTS (
+         SELECT 1 FROM quotes q
+         WHERE q.tenant_id = $1 AND q.id = $3 AND NOT ${pred}
+       ) AS is_hidden`,
+      [ctx.tenantId, viewerId, cleanId],
+    );
+    return Boolean(res.rows[0]?.is_hidden);
+  }
+
   public async isQuoteHiddenFromViewer(
     ctx: TenantContext,
     quoteId: string,
@@ -3516,19 +3528,9 @@ export class TenantIntakeQuoteRepository extends TenantScopedRepository {
   ): Promise<boolean> {
     const cleanId = quoteId?.trim();
     if (!cleanId) return false;
-    return this.withTenantReadTransaction(ctx, async (tx) => {
-      const pred = options?.hasRestrictedMatterAccess
-        ? QUOTE_DRAFT_ONLY_SQL_PREDICATE
-        : QUOTE_VISIBLE_SQL_PREDICATE;
-      const res = await tx.query<{ is_hidden: boolean }>(
-        `SELECT EXISTS (
-           SELECT 1 FROM quotes q
-           WHERE q.tenant_id = $1 AND q.id = $3 AND NOT ${pred}
-         ) AS is_hidden`,
-        [ctx.tenantId, viewerId, cleanId],
-      );
-      return Boolean(res.rows[0]?.is_hidden);
-    });
+    return this.withTenantReadTransaction(ctx, async (tx) =>
+      this.isQuoteHiddenFromViewerInTx(tx, ctx, cleanId, viewerId, options),
+    );
   }
 
   public async deleteQuoteById(

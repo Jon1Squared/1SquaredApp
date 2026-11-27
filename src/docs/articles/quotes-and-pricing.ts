@@ -12,7 +12,7 @@ This guide explains how **fee quotes**, **Price Transparency disclosures**, **Pa
 
 ## 1. Price Transparency wording in Administration
 
-Administrators with multi-factor authentication verified can configure default and work-type-specific **Price Transparency & Service Information** under **Administration → Work types**:
+If your firm has turned on Price Transparency disclosures, administrators with multi-factor authentication verified can configure default and work-type-specific **Price Transparency & Service Information** under **Administration → Work types**:
 
 1. Set firm default wording for your headline pricing summary, service scope, key stages, typical timescales, disbursements guidance, and exclusions or VAT notes, and choose whether Price Transparency disclosures are included by default.
 2. Select any practice area or individual work type to override specific sections where specialist guidance applies. Badges next to each field show whether wording comes from the work type, the parent practice area, or the firm default, and **Use inherited** clears a field override back to the inherited wording.
@@ -30,7 +30,7 @@ When creating or revising a quote from **New Quote** or **Revise quote**:
 
 From any quote page, or directly when saving a quote, you have three options:
 
-- **Download PDF:** Generates an up-to-date PDF quote document containing the firm’s contact details, scope, assumptions, minor-unit fee and disbursement breakdown, any requested Payment on Account, and Price Transparency disclosures. Client due diligence outcomes are never included in quote PDFs.
+- **Download PDF:** Generates an up-to-date PDF quote document containing the firm’s contact details, scope, assumptions, exact fee and disbursement breakdown, any requested Payment on Account, and Price Transparency disclosures. Client due diligence outcomes are never included in quote PDFs.
 - **Send Quote by Email:** Queues an email with the quote PDF attached (within the 3 MB total email attachment limit), freezes the Price Transparency snapshot onto the sent version, stamps the sent date and recipient address, and begins automated follow-up reminders when turned on. If live email delivery is paused on your environment, a banner confirms the email is safely queued in **Administration → Email Outbox** without sending external email.
 - **Record as Sent Offline:** Use this when a quote is posted, handed over in person, or sent outside the system. The quote moves to **Sent** without queuing an email or starting automated follow-up reminders.
 

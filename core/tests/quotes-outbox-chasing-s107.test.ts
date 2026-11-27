@@ -2,8 +2,10 @@ import { afterEach, describe, expect, it } from 'vitest';
 import {
   CORE_TENANT_MIGRATIONS,
   MAX_EMAIL_TOTAL_ATTACHMENT_BYTES,
+  type MinorUnits,
   TenantCatalogueRepository,
   TenantChasingRepository,
+  TenantHrAndRbacRepository,
   TenantIntakeQuoteRepository,
   TenantMatterRepository,
   TenantMigrationRunner,
@@ -22,12 +24,15 @@ import notALawFirmBaseConfig from '../../client-not-a-law-firm/config/base.json'
 import {
   getOutboxMessageForAdminAction,
   listOutboxMessagesForAdminAction,
+  logQuoteFollowUpAction,
   markQuoteSentOfflineAction,
   recordQuoteOutcomeAction,
+  retryCommunicationChaseAction,
   reviseQuoteAction,
   saveChasingConfigAction,
   saveEnquiryAction,
   saveQuoteAction,
+  saveTeamAction,
   saveWorkTypesConfigAction,
   sendQuoteEmailAction,
   stopCommunicationChaseAction,
@@ -41,6 +46,7 @@ import type {
   Person,
   Quote,
   Task,
+  Team,
 } from '@/domain/types';
 import { resolveEffectiveWorkTypesConfig } from '@/domain/workTypeConfig';
 import { setActiveTenantConfigForTesting } from '@/platform/tenantRuntime';
@@ -1280,10 +1286,629 @@ describe('S1-07: Quote PDFs, outbox dispatch across send flows, POA, Price Trans
         }),
       );
       await expectForged(() => saveWorkTypesConfigAction(updatedWorkTypes, 'Forged save'));
+      await expectForged(() =>
+        recordQuoteOutcomeAction(alphaQuoteId, { outcome: 'Accepted' }),
+      );
     } finally {
       setTestActorSession(null);
       setActiveTenantConfigForTesting(null);
       await poolManager.closeAllPools();
     }
   }, 45_000);
+
+  it('6. Review hardening (R855, R856, R858-R861): terminal/converted/version locks, PDF race conflict, chase stop on save/followUp Expired & offline save, restricted enquiry escalation visibility, pence priority & locked outcome', async () => {
+    await resetAllDemoData('P-000004', testDataResetContext());
+    const ctx = testTenantCtx('P-000002');
+    const intakeRepo = new TenantIntakeQuoteRepository();
+    const outboxRepo = new TenantOutboxRepository();
+    const chasingRepo = new TenantChasingRepository();
+    const taskRepo = new TenantTaskWorkflowRepository();
+    const matterRepo = new TenantMatterRepository();
+    const hrRepo = new TenantHrAndRbacRepository();
+    const { raw: chaseRaw, cfg: chaseCfg } = makeQuoteChasingConfig({
+      enabled: true,
+      sendEmails: true,
+      firstChaseDays: 7,
+      secondChaseDays: 14,
+      escalateTaskDays: 21,
+      emailDisabled: true,
+    });
+    setActiveTenantConfigForTesting(chaseRaw, {});
+
+    await runAsActionActor(
+      'P-000004',
+      () => saveChasingConfigAction(chaseCfg.chasing ?? {}, 'R855-R861 test chase config'),
+      { roles: ['admin'], mfaVerified: true },
+    );
+
+    const baseQuoteInput = (label: string, validUntil = '2027-06-30') => ({
+      clientType: 'prospect' as const,
+      prospectName: `Hardening ${label}`,
+      prospectEmail: `hardening-${label.toLowerCase()}@example.test`,
+      practiceAreaId: 'work_type.corporate_and_commercial',
+      scope: `Scope for ${label}`,
+      feeBasis: 'Fixed fee' as const,
+      feeAmountExVat: 1200,
+      validUntil,
+      feeEarnerId: 'P-000002',
+      followUpAfterDays: 7,
+    });
+
+    // R855: Accepted, Converted, Declined, Expired, and Superseded quotes refuse saveQuoteAction & reviseQuoteAction
+    const accRes = await runAsActionActor(
+      'P-000002',
+      () =>
+        saveQuoteAction(baseQuoteInput('R855Acc'), {
+          markAsSent: true,
+          sendMode: 'email',
+          idempotencyKey: 'r855-acc',
+        }),
+      { roles: ['fee_earner'], mfaVerified: false },
+    );
+    const accQuoteId = accRes.quote!.id;
+    await runAsActionActor(
+      'P-000002',
+      () => recordQuoteOutcomeAction(accQuoteId, { outcome: 'Accepted' }),
+      { roles: ['fee_earner'], mfaVerified: false },
+    );
+
+    const decRes = await runAsActionActor(
+      'P-000002',
+      () =>
+        saveQuoteAction(baseQuoteInput('R855Dec'), {
+          markAsSent: true,
+          sendMode: 'email',
+          idempotencyKey: 'r855-dec',
+        }),
+      { roles: ['fee_earner'], mfaVerified: false },
+    );
+    const decQuoteId = decRes.quote!.id;
+    await runAsActionActor(
+      'P-000002',
+      () =>
+        recordQuoteOutcomeAction(decQuoteId, {
+          outcome: 'Declined',
+          declineReason: 'Price',
+        }),
+      { roles: ['fee_earner'], mfaVerified: false },
+    );
+
+    const expRes = await runAsActionActor(
+      'P-000002',
+      () =>
+        saveQuoteAction(baseQuoteInput('R855Exp', '2026-01-10'), {
+          markAsSent: true,
+          sendMode: 'email',
+          idempotencyKey: 'r855-exp',
+        }),
+      { roles: ['fee_earner'], mfaVerified: false },
+    );
+    const expQuoteId = expRes.quote!.id;
+    await executeQuoteExpiryForTenant(ctx, {
+      triggerSource: 'manual',
+      triggeredById: 'system:quote-expiry',
+      tenantConfig: chaseCfg,
+    });
+
+    const supRes = await runAsActionActor(
+      'P-000002',
+      () => saveQuoteAction(baseQuoteInput('R855Sup')),
+      { roles: ['fee_earner'], mfaVerified: false },
+    );
+    const supQuoteId = supRes.quote!.id;
+    const supQuoteObj = (await intakeRepo.getQuoteById<Quote>(ctx, supQuoteId))!;
+    supQuoteObj.status = 'Superseded';
+    await intakeRepo.putQuote(ctx, supQuoteObj);
+
+    const convRes = await runAsActionActor(
+      'P-000002',
+      () =>
+        saveQuoteAction(baseQuoteInput('R855Conv'), {
+          markAsSent: true,
+          sendMode: 'email',
+          idempotencyKey: 'r855-conv',
+        }),
+      { roles: ['fee_earner'], mfaVerified: false },
+    );
+    const convQuoteId = convRes.quote!.id;
+    const convPrep = await runAsActionActor(
+      'P-000002',
+      () => prepareQuoteConversionRecord(convQuoteId, 'P-000002'),
+      { roles: ['fee_earner'], mfaVerified: false },
+    );
+    await runAsActionActor(
+      'P-000002',
+      () =>
+        saveMatterRecord(
+          {
+            title: 'R855 Converted Quote Matter',
+            clientId: convPrep.clientId!,
+            instructingContactId: convPrep.instructingContactId!,
+            practiceAreaId: 'work_type.corporate_and_commercial',
+            workTypeSubcategoryId: 'work_type.corporate_and_commercial_commercial_contracts',
+            responsiblePartnerId: 'P-000001',
+            supervisingPartnerId: 'P-000001',
+            leadFeeEarnerId: 'P-000002',
+            teamMemberIds: ['P-000001', 'P-000002'],
+            sourceQuoteId: convQuoteId,
+            conflictCheckRecord: makeConflictRecord('P-000002', 'Dafydd Evans'),
+            riskAssessment: { answers: BASE_LOW_RISK_ANSWERS },
+          },
+          { byId: 'P-000002', saveMode: 'draft' },
+        ),
+      { roles: ['fee_earner'], mfaVerified: false },
+    );
+
+    for (const [label, qId, expectedStatus] of [
+      ['Accepted', accQuoteId, 'Accepted'],
+      ['Declined', decQuoteId, 'Declined'],
+      ['Expired', expQuoteId, 'Expired'],
+      ['Superseded', supQuoteId, 'Superseded'],
+      ['Converted', convQuoteId, 'Accepted'],
+    ] as const) {
+      const outboxBefore = (await outboxRepo.listOutboxRecords(ctx, { limit: 200 })).filter(
+        (r) => r.quoteId === qId,
+      ).length;
+
+      const emailSaveRes = await runAsActionActor(
+        'P-000002',
+        () =>
+          saveQuoteAction(baseQuoteInput(`BlockedEmail${label}`), {
+            id: qId,
+            markAsSent: true,
+            sendMode: 'email',
+            idempotencyKey: `r855-blk-email-${label}`,
+          }),
+        { roles: ['fee_earner'], mfaVerified: false },
+      );
+      expect(emailSaveRes.code, `${label} save email`).toBe('VALIDATION_ERROR');
+
+      const offlineSaveRes = await runAsActionActor(
+        'P-000002',
+        () =>
+          saveQuoteAction(baseQuoteInput(`BlockedOff${label}`), {
+            id: qId,
+            markAsSent: true,
+            sendMode: 'offline',
+          }),
+        { roles: ['fee_earner'], mfaVerified: false },
+      );
+      expect(offlineSaveRes.code, `${label} save offline`).toBe('VALIDATION_ERROR');
+
+      const revRes = await runAsActionActor(
+        'P-000002',
+        () =>
+          reviseQuoteAction(qId, {
+            feeBasis: 'Fixed fee',
+            feeAmountExVat: 9999,
+            scope: 'Blocked revise',
+          }),
+        { roles: ['fee_earner'], mfaVerified: false },
+      );
+      expect(revRes.code, `${label} revise`).toBe('VALIDATION_ERROR');
+
+      const afterQ = (await intakeRepo.getQuoteById<Quote>(ctx, qId))!;
+      expect(afterQ.status).toBe(expectedStatus);
+      const outboxAfter = (await outboxRepo.listOutboxRecords(ctx, { limit: 200 })).filter(
+        (r) => r.quoteId === qId,
+      ).length;
+      expect(outboxAfter).toBe(outboxBefore);
+      expect(
+        await chasingRepo.getActiveChaseForEntity(ctx, {
+          entityKind: 'quote',
+          entityId: qId,
+        }),
+      ).toBeNull();
+    }
+
+    // R855 version/updatedAt conflict on concurrent reviseQuoteAction calls
+    const revTarget = (
+      await runAsActionActor(
+        'P-000002',
+        () => saveQuoteAction(baseQuoteInput('RevConflict')),
+        { roles: ['fee_earner'], mfaVerified: false },
+      )
+    ).quote!;
+    const [revA, revB] = await runAsActionActor(
+      'P-000002',
+      () =>
+        Promise.all([
+          reviseQuoteAction(revTarget.id, {
+            feeBasis: 'Fixed fee',
+            feeAmountExVat: 1500,
+            scope: 'Concurrent rev A',
+          }),
+          reviseQuoteAction(revTarget.id, {
+            feeBasis: 'Fixed fee',
+            feeAmountExVat: 1600,
+            scope: 'Concurrent rev B',
+          }),
+        ]),
+      { roles: ['fee_earner'], mfaVerified: false },
+    );
+    const revOutcomes = [revA, revB];
+    expect(revOutcomes.some((r) => Boolean(r.quote) && r.quote?.version === 2)).toBe(true);
+    expect(revOutcomes.some((r) => !r.quote && r.code === 'CONFLICT')).toBe(true);
+
+    // R858: Concurrent edit between PDF render and TX commit in sendQuoteEmailRecord -> CONFLICT + 0 outboxes
+    const r858Draft = (
+      await runAsActionActor(
+        'P-000002',
+        () => saveQuoteAction(baseQuoteInput('R858Race')),
+        { roles: ['fee_earner'], mfaVerified: false },
+      )
+    ).quote!;
+    const r858Converter: DocumentPdfConverter = {
+      converterId: 'r858-race-converter',
+      async convertDocxToPdf() {
+        await saveQuoteAction(
+          {
+            ...baseQuoteInput('R858RaceEdited'),
+            feeAmountExVat: 8888,
+            scope: 'Mutated right before send TX',
+          },
+          { id: r858Draft.id },
+        );
+        return Buffer.from('%PDF-1.4\n% stale PDF bytes\n%%EOF\n');
+      },
+    };
+    const r858Res = await runAsActionActor(
+      'P-000002',
+      () =>
+        sendQuoteEmailRecord(
+          { quoteId: r858Draft.id, idempotencyKey: 'r858-conflict-check' },
+          'P-000002',
+          { pdfConverter: r858Converter, drainAfterCommit: false },
+        ),
+      { roles: ['fee_earner'], mfaVerified: false },
+    );
+    expect(r858Res.ok).toBe(false);
+    if (!r858Res.ok) {
+      expect(r858Res.code).toBe('CONFLICT');
+    }
+    expect(
+      (await outboxRepo.listOutboxRecords(ctx, { limit: 200 })).filter(
+        (r) => r.quoteId === r858Draft.id,
+      ),
+    ).toHaveLength(0);
+
+    // R859(a): Updating validUntil into the past on an open Sent quote transitions it to Expired & stops chase in the same TX
+    const r859PlainRes = await runAsActionActor(
+      'P-000002',
+      () =>
+        saveQuoteAction(baseQuoteInput('R859Plain', '2027-06-30'), {
+          markAsSent: true,
+          sendMode: 'email',
+          idempotencyKey: 'r859-plain',
+        }),
+      { roles: ['fee_earner'], mfaVerified: false },
+    );
+    expect(r859PlainRes.chase?.status).toBe('active');
+    const r859PlainSaved = await runAsActionActor(
+      'P-000002',
+      () =>
+        saveQuoteAction(baseQuoteInput('R859PlainUpdated', '2026-01-10'), {
+          id: r859PlainRes.quote!.id,
+        }),
+      { roles: ['fee_earner'], mfaVerified: false },
+    );
+    expect(r859PlainSaved.quote?.status).toBe('Expired');
+    expect((await chasingRepo.getChaseById(ctx, r859PlainRes.chase!.id))?.stoppedReason).toBe(
+      'expired',
+    );
+    // Subsequent edit on the now-Expired quote refuses cleanly (R855)
+    const r855AlreadyExpEdit = await runAsActionActor(
+      'P-000002',
+      () =>
+        saveQuoteAction(baseQuoteInput('R859PlainBlockedAgain', '2027-06-30'), {
+          id: r859PlainRes.quote!.id,
+        }),
+      { roles: ['fee_earner'], mfaVerified: false },
+    );
+    expect(r855AlreadyExpEdit.code).toBe('VALIDATION_ERROR');
+
+    // R859(b): logQuoteFollowUpAction on an Expired-by-date Sent quote stops its active chase in the same TX
+    const r859FuRes = await runAsActionActor(
+      'P-000002',
+      () =>
+        saveQuoteAction(baseQuoteInput('R859Fu', '2026-01-10'), {
+          markAsSent: true,
+          sendMode: 'email',
+          idempotencyKey: 'r859-fu',
+        }),
+      { roles: ['fee_earner'], mfaVerified: false },
+    );
+    const r859FuLogged = await runAsActionActor(
+      'P-000002',
+      () =>
+        logQuoteFollowUpAction(r859FuRes.quote!.id, {
+          method: 'Phone',
+          note: 'Client confirmed quote expired',
+          nextFollowUpDate: null,
+        }),
+      { roles: ['fee_earner'], mfaVerified: false },
+    );
+    expect(r859FuLogged.quote?.status).toBe('Expired');
+    expect((await chasingRepo.getChaseById(ctx, r859FuRes.chase!.id))?.stoppedReason).toBe(
+      'expired',
+    );
+
+    // R859(c): Offline save on an already-emailed Sent quote stops email chase with 'superseded'
+    const r859OffRes = await runAsActionActor(
+      'P-000002',
+      () =>
+        saveQuoteAction(baseQuoteInput('R859OfflineSave'), {
+          markAsSent: true,
+          sendMode: 'email',
+          idempotencyKey: 'r859-off-save',
+        }),
+      { roles: ['fee_earner'], mfaVerified: false },
+    );
+    expect(r859OffRes.chase?.status).toBe('active');
+    await runAsActionActor(
+      'P-000002',
+      () =>
+        saveQuoteAction(baseQuoteInput('R859OfflineSave'), {
+          id: r859OffRes.quote!.id,
+          markAsSent: true,
+          sendMode: 'offline',
+        }),
+      { roles: ['fee_earner'], mfaVerified: false },
+    );
+    expect((await chasingRepo.getChaseById(ctx, r859OffRes.chase!.id))?.stoppedReason).toBe(
+      'superseded',
+    );
+
+    // R860: upsertQuoteInTx uses paymentOnAccountPence as authoritative over paymentOnAccountGbp
+    const qPoaAuthoritative = (
+      await runAsActionActor(
+        'P-000002',
+        () => saveQuoteAction(baseQuoteInput('R860PenceWins')),
+        { roles: ['fee_earner'], mfaVerified: false },
+      )
+    ).quote!;
+    await intakeRepo.withTenantTransaction(ctx, async (tx) => {
+      await intakeRepo.upsertQuoteInTx(tx, ctx, {
+        ...qPoaAuthoritative,
+        paymentOnAccountRequired: true,
+        paymentOnAccountPence: 50000 as MinorUnits,
+        paymentOnAccountGbp: 499.99,
+      });
+    });
+    const qPoaStored = (await intakeRepo.getQuoteById<Quote>(ctx, qPoaAuthoritative.id))!;
+    expect(qPoaStored.paymentOnAccountPence).toBe(50000);
+    expect(qPoaStored.paymentOnAccountGbp).toBe(500);
+
+    // R861: Concurrent sendQuoteEmailRecord + recordQuoteOutcomeAction preserves send metadata
+    const r861Draft = (
+      await runAsActionActor(
+        'P-000002',
+        () => saveQuoteAction(baseQuoteInput('R861LockedOutcome')),
+        { roles: ['fee_earner'], mfaVerified: false },
+      )
+    ).quote!;
+    const r861Converter: DocumentPdfConverter = {
+      converterId: 'r861-concurrent-converter',
+      async convertDocxToPdf() {
+        return Buffer.from('%PDF-1.4\n% R861 PDF\n%%EOF\n');
+      },
+    };
+    const [sendFirstRes, outcomeAfterRes] = await runAsActionActor(
+      'P-000002',
+      async () => {
+        const sent = await sendQuoteEmailRecord(
+          { quoteId: r861Draft.id, idempotencyKey: 'r861-send-key' },
+          'P-000002',
+          { pdfConverter: r861Converter, drainAfterCommit: false },
+        );
+        const outcome = await recordQuoteOutcomeAction(r861Draft.id, {
+          outcome: 'Accepted',
+          note: 'Accepted immediately after send',
+        });
+        return [sent, outcome] as const;
+      },
+      { roles: ['fee_earner'], mfaVerified: false },
+    );
+    expect(sendFirstRes.ok).toBe(true);
+    expect(outcomeAfterRes.quote?.status).toBe('Accepted');
+    expect(outcomeAfterRes.quote?.lastSentOutboxId).toBe(
+      sendFirstRes.ok ? sendFirstRes.outboxRecord.id : 'missing',
+    );
+    expect(outcomeAfterRes.quote?.sentToEmail).toBe('hardening-r861lockedoutcome@example.test');
+
+    // True concurrent Promise.all race check on a second quote
+    const r861RaceQ = (
+      await runAsActionActor(
+        'P-000002',
+        () => saveQuoteAction(baseQuoteInput('R861TrueRace')),
+        { roles: ['fee_earner'], mfaVerified: false },
+      )
+    ).quote!;
+    const [raceSend, raceOutcome] = await runAsActionActor(
+      'P-000002',
+      () =>
+        Promise.all([
+          sendQuoteEmailAction({ quoteId: r861RaceQ.id, idempotencyKey: 'r861-true-race' }),
+          recordQuoteOutcomeAction(r861RaceQ.id, { outcome: 'Accepted', note: 'Concurrent race' }),
+        ]),
+      { roles: ['fee_earner'], mfaVerified: false },
+    );
+    const raceFinal = (await intakeRepo.getQuoteById<Quote>(ctx, r861RaceQ.id))!;
+    if (raceSend.ok) {
+      expect(raceFinal.lastSentOutboxId).toBe(raceSend.outboxRecord.id);
+      expect(raceFinal.sentToEmail).toBe('hardening-r861truerace@example.test');
+      expect(raceFinal.status).toBe('Accepted');
+    } else {
+      expect(raceOutcome.quote?.status).toBe('Accepted');
+      expect(raceSend.code).toBe('VALIDATION_ERROR');
+    }
+
+    // R856: Enquiry converted to a restricted staff matter while older quote on it stays Sent & chased;
+    // Day 21 escalation excludes unauthorised team lead / fee earner via repository visibility predicate -> needs_owner,
+    // then succeeds when an authorised restricted team lead (P-000004) becomes lead on retry
+    const allTeams = await hrRepo.listAllTeams<Team>(ctx);
+    const corpTeam =
+      allTeams.find(
+        (t) => t.active && t.practiceAreaIds.includes('work_type.corporate_and_commercial'),
+      ) ?? allTeams.find((t) => t.active)!;
+    // Configure team lead solely to P-000002 (no matter:restricted:access) while keeping practiceAreaIds
+    await runAsActionActor(
+      'P-000004',
+      () =>
+        saveTeamAction({
+          id: corpTeam.id,
+          name: corpTeam.name,
+          description: corpTeam.description,
+          departmentId: corpTeam.departmentId,
+          orgTeamId: corpTeam.orgTeamId,
+          systemKey: corpTeam.systemKey,
+          memberIds: Array.from(new Set([...corpTeam.memberIds, 'P-000002', 'P-000006'])),
+          leadIds: ['P-000002'],
+          practiceAreaIds: corpTeam.practiceAreaIds,
+          active: true,
+        }),
+      { roles: ['partner', 'admin'], mfaVerified: true },
+    );
+
+    const enqCreated = await runAsActionActor(
+      'P-000002',
+      () =>
+        saveEnquiryAction({
+          firstName: 'Restricted',
+          lastName: 'EscClient',
+          email: 'restricted-esc@example.test',
+          channelId: 'enquiry_channel.email',
+          practiceAreaId: 'work_type.corporate_and_commercial',
+          summary: 'Enquiry linked to older quote before restricted conversion.',
+          notes: 'Enquiry notes before conversion to restricted matter.',
+          urgencyId: 'urgency.standard',
+          privacyNoticeGiven: true,
+        }),
+      { roles: ['fee_earner'], mfaVerified: false },
+    );
+    expect(enqCreated.enquiry).toBeTruthy();
+    const enqId = enqCreated.enquiry!.id;
+
+    // Older quote sent on that enquiry with P-000006 as fee earner and P-000002 as team lead (neither has restricted access)
+    const oldQuoteSent = await runAsActionActor(
+      'P-000002',
+      () =>
+        saveQuoteAction(
+          {
+            ...baseQuoteInput('R856Esc'),
+            linkedEnquiryId: enqId,
+            feeEarnerId: 'P-000006',
+          },
+          { markAsSent: true, sendMode: 'email', idempotencyKey: 'r856-esc-quote' },
+        ),
+      { roles: ['fee_earner'], mfaVerified: false },
+    );
+    const escQuoteId = oldQuoteSent.quote!.id;
+    const escChaseId = oldQuoteSent.chase!.id;
+    const escSentAt = new Date(oldQuoteSent.chase!.sentAt);
+
+    // Enquiry converted into a restricted staff matter (restricted strictly to P-000004), WITHOUT setting sourceQuoteId
+    const enqConvMatter = await runAsActionActor(
+      'P-000004',
+      () =>
+        saveMatterRecord(
+          {
+            title: 'R856 Restricted Enquiry Matter',
+            clientId: 'O-000001',
+            practiceAreaId: 'work_type.corporate_and_commercial',
+            workTypeSubcategoryId: 'work_type.corporate_and_commercial_commercial_contracts',
+            responsiblePartnerId: 'P-000004',
+            supervisingPartnerId: 'P-000004',
+            leadFeeEarnerId: 'P-000004',
+            teamMemberIds: ['P-000004'],
+            sourceEnquiryId: enqId,
+            isStaffMatter: true,
+            restrictedAccessUserIds: ['P-000004'],
+            conflictCheckRecord: makeConflictRecord('P-000004', 'Gareth Davies'),
+            riskAssessment: { answers: BASE_LOW_RISK_ANSWERS },
+          },
+          { byId: 'P-000004', saveMode: 'draft' },
+        ),
+      { roles: ['partner'], mfaVerified: true },
+    );
+    const enqLoaded = (await intakeRepo.getEnquiryById<Enquiry>(ctx, enqId, {
+      includeRestricted: true,
+    }))!;
+    enqLoaded.convertedMatterId = enqConvMatter.matter!.id;
+    await intakeRepo.putEnquiry(ctx, enqLoaded);
+    await matterRepo.putMatter(
+      ctx,
+      {
+        ...enqConvMatter.matter!,
+        hasEthicalWall: true,
+        restrictedAccessUserIds: ['P-000004'],
+      },
+      {
+        expectedRowVersion: null,
+        sqlRestrictedAccessUserIds: ['P-000004'],
+      },
+    );
+
+    // Advance chase to Day 7 -> 14 -> 21
+    await executeCommunicationChasesForTenant(ctx, {
+      triggerSource: 'manual',
+      triggeredById: 'system:communication-chases',
+      tenantConfig: chaseCfg,
+      drainAfterCommit: false,
+      now: addDays(escSentAt, 7),
+    });
+    await executeCommunicationChasesForTenant(ctx, {
+      triggerSource: 'manual',
+      triggeredById: 'system:communication-chases',
+      tenantConfig: chaseCfg,
+      drainAfterCommit: false,
+      now: addDays(escSentAt, 14),
+    });
+    const d21Esc = await executeCommunicationChasesForTenant(ctx, {
+      triggerSource: 'manual',
+      triggeredById: 'system:communication-chases',
+      tenantConfig: chaseCfg,
+      drainAfterCommit: false,
+      now: addDays(escSentAt, 21),
+    });
+    expect(d21Esc.outcome).toBe('executed');
+    expect(await taskRepo.listTasksLinkedToRecord<Task>(ctx, 'quote', escQuoteId)).toHaveLength(0);
+    expect((await chasingRepo.getChaseById(ctx, escChaseId))?.status).toBe('needs_owner');
+
+    // Add authorised user P-000003 (holds matter:restricted:access + quote:view; P-000004 avoids self-escalation) & retry escalation -> P-000003 gets task, NOT P-000002 / P-000006
+    const teamUpdate2 = await runAsActionActor(
+      'P-000004',
+      () =>
+        saveTeamAction({
+          id: corpTeam.id,
+          name: corpTeam.name,
+          description: corpTeam.description,
+          departmentId: corpTeam.departmentId,
+          orgTeamId: corpTeam.orgTeamId,
+          systemKey: corpTeam.systemKey,
+          memberIds: Array.from(new Set([...corpTeam.memberIds, 'P-000003', 'P-000004'])),
+          leadIds: ['P-000002', 'P-000003'],
+          practiceAreaIds: corpTeam.practiceAreaIds,
+          active: true,
+        }),
+      { roles: ['partner', 'admin'], mfaVerified: true },
+    );
+    expect(teamUpdate2.team).toBeTruthy();
+    const retryRes = await runAsActionActor(
+      'P-000004',
+      () => retryCommunicationChaseAction({ chaseId: escChaseId }),
+      { roles: ['partner', 'admin'], mfaVerified: true },
+    );
+    expect(retryRes.ok).toBe(true);
+    if (retryRes.ok) {
+      expect(retryRes.outcome).toBe('escalated');
+    }
+    const escTasksResolved = await taskRepo.listTasksLinkedToRecord<Task>(
+      testTenantCtx('P-000003'),
+      'quote',
+      escQuoteId,
+    );
+    expect(escTasksResolved).toHaveLength(1);
+    expect(escTasksResolved[0]?.assignedPersonId).toBe('P-000003');
+  }, 60_000);
 });

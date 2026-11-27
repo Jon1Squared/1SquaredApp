@@ -99,7 +99,7 @@ import {
   logEmployeeRestrictedAccess,
   logEnquiryContactRecord,
   logQuoteFollowUpRecord,
-  markQuoteSentRecord,
+  markQuoteSentOfflineRecord,
   previewRbacOverrides,
   prepareEnquiryConversion,
   prepareQuoteConversionRecord,
@@ -3609,7 +3609,11 @@ describe('Central Configuration-Driven RBAC (ADR-0010 .. ADR-0016)', () => {
               ),
             ),
           ).toBe(true);
-          expect(isActionDenied(await markQuoteSentRecord(existingQuote.id, financeUser.id))).toBe(true);
+          expect(
+            isActionDenied(
+              await markQuoteSentOfflineRecord({ quoteId: existingQuote.id }, financeUser.id),
+            ),
+          ).toBe(true);
           expect(
             isActionDenied(
               await logQuoteFollowUpRecord(

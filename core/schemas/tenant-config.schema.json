@@ -1734,31 +1734,37 @@
                 },
                 "headlineSummary": {
                   "type": "string",
+                  "maxLength": 2000,
                   "default": "",
                   "description": "Headline fee and pricing basis overview"
                 },
                 "serviceDescription": {
                   "type": "string",
+                  "maxLength": 4000,
                   "default": "",
                   "description": "Description of legal work and supervision included"
                 },
                 "keyStages": {
                   "type": "string",
+                  "maxLength": 4000,
                   "default": "",
                   "description": "Key stages of the matter"
                 },
                 "typicalTimescales": {
                   "type": "string",
+                  "maxLength": 2000,
                   "default": "",
                   "description": "Indicative matter timescales"
                 },
                 "disbursementsGuidance": {
                   "type": "string",
+                  "maxLength": 4000,
                   "default": "",
                   "description": "Likely third-party disbursements and VAT treatment"
                 },
                 "exclusionsAndVatNote": {
                   "type": "string",
+                  "maxLength": 2000,
                   "default": "",
                   "description": "Exclusions, scope-change assumptions, and VAT rate notice"
                 }
@@ -2008,26 +2014,32 @@
                   },
                   "headlineSummary": {
                     "type": "string",
+                    "maxLength": 2000,
                     "description": "Overrides headline fee and pricing basis overview for this work type"
                   },
                   "serviceDescription": {
                     "type": "string",
+                    "maxLength": 4000,
                     "description": "Overrides description of legal work and supervision for this work type"
                   },
                   "keyStages": {
                     "type": "string",
+                    "maxLength": 4000,
                     "description": "Overrides key stages guidance for this work type"
                   },
                   "typicalTimescales": {
                     "type": "string",
+                    "maxLength": 2000,
                     "description": "Overrides typical timescales guidance for this work type"
                   },
                   "disbursementsGuidance": {
                     "type": "string",
+                    "maxLength": 4000,
                     "description": "Overrides likely third-party disbursements guidance for this work type"
                   },
                   "exclusionsAndVatNote": {
                     "type": "string",
+                    "maxLength": 2000,
                     "description": "Overrides exclusions and VAT note for this work type"
                   }
                 }

@@ -522,14 +522,16 @@ export function QuoteDetailClient({
               >
                 Record outcome
               </button>
-              <button
-                type="button"
-                className="btn btn--secondary"
-                disabled={pending}
-                onClick={() => setViewMode('revise')}
-              >
-                Revise quote
-              </button>
+              {!convertedMatter ? (
+                <button
+                  type="button"
+                  className="btn btn--secondary"
+                  disabled={pending}
+                  onClick={() => setViewMode('revise')}
+                >
+                  Revise quote
+                </button>
+              ) : null}
             </>
           ) : null}
 
@@ -553,14 +555,6 @@ export function QuoteDetailClient({
                   →
                 </Link>
               )}
-              <button
-                type="button"
-                className="btn btn--secondary"
-                disabled={pending}
-                onClick={() => setViewMode('revise')}
-              >
-                Revise quote
-              </button>
             </>
           ) : null}
 
@@ -568,14 +562,6 @@ export function QuoteDetailClient({
           effectiveStatus === 'Expired' ||
           effectiveStatus === 'Superseded' ? (
             <>
-              <button
-                type="button"
-                className="btn btn--primary"
-                disabled={pending}
-                onClick={() => setViewMode('revise')}
-              >
-                Revise quote (create v{quote.version + 1})
-              </button>
               <button
                 type="button"
                 className="btn btn--secondary"

@@ -145,32 +145,72 @@ export function validateAndNormalizeQuotePoa(input: {
     input.paymentOnAccountGbp !== null &&
     String(input.paymentOnAccountGbp).trim() !== ''
   ) {
-    const raw =
-      typeof input.paymentOnAccountGbp === 'string'
-        ? input.paymentOnAccountGbp.trim()
-        : input.paymentOnAccountGbp;
-    const numeric = Number(raw);
-    if (!Number.isFinite(numeric)) {
+    const raw = input.paymentOnAccountGbp;
+    if (typeof raw === 'number') {
+      if (!Number.isFinite(raw)) {
+        return {
+          ok: false,
+          error: 'Payment on Account amount must be a valid finite number.',
+        };
+      }
+      if (raw < 0) {
+        return {
+          ok: false,
+          error: 'Payment on Account amount cannot be negative.',
+        };
+      }
+      const rawText = String(raw);
+      if (/[eE]/.test(rawText) || !/^\d+(?:\.\d{1,2})?$/.test(rawText)) {
+        return {
+          ok: false,
+          error:
+            'Payment on Account amount must be a valid GBP amount with at most two decimal places.',
+        };
+      }
+      const [wholeStr, fracStr = ''] = rawText.split('.');
+      const computed =
+        Number.parseInt(wholeStr!, 10) * 100 +
+        Number.parseInt(fracStr.padEnd(2, '0'), 10);
+      if (!Number.isSafeInteger(computed)) {
+        return {
+          ok: false,
+          error: 'Payment on Account amount is too large.',
+        };
+      }
+      pence = computed as MinorUnits;
+    } else if (typeof raw === 'string') {
+      const trimmed = raw.trim();
+      if (/^-/.test(trimmed)) {
+        const numeric = Number(trimmed);
+        if (Number.isFinite(numeric) && numeric < 0) {
+          return {
+            ok: false,
+            error: 'Payment on Account amount cannot be negative.',
+          };
+        }
+      }
+      if (!/^\d+(?:\.\d{1,2})?$/.test(trimmed)) {
+        return {
+          ok: false,
+          error:
+            'Payment on Account amount must be a valid GBP amount with at most two decimal places.',
+        };
+      }
+      const [wholeStr, fracStr = ''] = trimmed.split('.');
+      const computed =
+        Number.parseInt(wholeStr!, 10) * 100 +
+        Number.parseInt(fracStr.padEnd(2, '0'), 10);
+      if (!Number.isSafeInteger(computed)) {
+        return {
+          ok: false,
+          error: 'Payment on Account amount is too large.',
+        };
+      }
+      pence = computed as MinorUnits;
+    } else {
       return {
         ok: false,
         error: 'Payment on Account amount must be a valid number.',
-      };
-    }
-    if (numeric < 0) {
-      return {
-        ok: false,
-        error: 'Payment on Account amount cannot be negative.',
-      };
-    }
-    try {
-      pence =
-        typeof raw === 'number' && /[eE]/.test(String(raw))
-          ? poundsToMinorUnits(numeric.toFixed(4))
-          : poundsToMinorUnits(raw);
-    } catch {
-      return {
-        ok: false,
-        error: 'Payment on Account amount must be a valid GBP amount.',
       };
     }
   }
