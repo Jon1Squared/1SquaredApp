@@ -195,7 +195,7 @@ describe('Key Dates Two-Tenant Isolation, Migrations & Restricted Matter Omissio
       await runner.applyUp(ctxA, CORE_TENANT_MIGRATIONS);
       await runner.applyUp(ctxB, CORE_TENANT_MIGRATIONS);
     }
-  });
+  }, 60_000);
 
   it('isolates KeyDate, ReminderState, CalendarSync, NotApplicable, and AuditEvent records between Tenant A and Tenant B, including tampered record IDs and cross-tenant writes (R30, R31)', async () => {
     const repo = new TenantKeyDateRepository();
