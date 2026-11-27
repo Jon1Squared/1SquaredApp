@@ -23,7 +23,7 @@ Related Architecture Decision Records:
 ## 1. Central Permission Registry (`PERMISSION_REGISTRY`)
 
 Defined in `core/src/domain/rbac/registry.ts` and exported from `@platform/core`.
-Every permission uses the `resource:action` naming convention, carries a sensitivity classification (`standard | confidential | restricted | critical`), states whether multi-factor authentication (`requiresMfa`) is required, and optionally marks `jobOnly: true` for permissions reserved exclusively for unattended background jobs (`ALL_USER_PERMISSION_KEYS` has 71 user permissions; `ALL_JOB_ONLY_PERMISSION_KEYS` has 10 job-only permissions; 81 total).
+Every permission uses the `resource:action` naming convention, carries a sensitivity classification (`standard | confidential | restricted | critical`), states whether multi-factor authentication (`requiresMfa`) is required, and optionally marks `jobOnly: true` for permissions reserved exclusively for unattended background jobs (`ALL_USER_PERMISSION_KEYS` has 71 user permissions; `ALL_JOB_ONLY_PERMISSION_KEYS` has 11 job-only permissions; 82 total).
 
 | Permission Key | Domain | Sensitivity | Requires MFA | Description |
 | :--- | :--- | :--- | :--- | :--- |
@@ -108,6 +108,7 @@ Every permission uses the `resource:action` naming convention, carries a sensiti
 | `notification:drain_outbox` | `notification` | `critical` | No (`jobOnly: true`) | Execute the scheduled `outbox-drain` job across provisioned tenants to deliver queued email and Teams notifications and scrub expired content (`system:outbox-drain` via `guardedJob`, ADR 0027 / ADR 0035) |
 | `notification:send_digests` | `notification` | `critical` | No (`jobOnly: true`) | Execute the scheduled daily and weekly `notification-digests` job across provisioned tenants (`system:notification-digests` via `guardedJob`, ADR 0035) |
 | `quote:run_expiry` | `quote` | `critical` | No (`jobOnly: true`) | Execute the scheduled daily `quote-expiry` job to persist overdue quote expiry and audit entries across provisioned tenants (`system:quote-expiry` via `guardedJob`, ADR 0030) |
+| `communication:run_chases` | `communication` | `critical` | No (`jobOnly: true`) | Execute the scheduled daily generic communication chasing sweep across engagement letters, quotes, and money on account requests (`system:communication-chases` via `guardedJob`, ADR 0030, ADR 0042) |
 
 > **Job-only permission invariant (`ADR-0030 §3`):** No built-in or custom role (`admin` included) holds any `jobOnly: true` permission (`DEFAULT_RBAC_ROLES.admin.permissions` uses `ALL_USER_PERMISSION_KEYS` minus `undertaking:manage`, `cdd:view`, `cdd:record`, and `matter:opening_gate:override`). `resolvePermissions`, `resolvePersonPermissionSet`, `updatePersonPermissionOverrides`, and `updateTenantRbacConfig` strip or reject any attempt to grant a `jobOnly` permission to a person, role, or department (`FORBIDDEN`).
 

@@ -6,7 +6,7 @@ export const engagementLettersArticle: DocArticle = {
   section: 'documents-dms',
   summary:
     'How to send Client Care letters with PDFs attached, review queued emails and attachments in Administration, manage automatic reminders, upload signed copies to unlock the opening gate, and send Non-Engagement letters.',
-  updated: '2026-11-26',
+  updated: '2026-11-27',
   body: `
 This guide explains how **Client Care & engagement letters**, automated follow-up reminders, signed-copy uploads, **Non-Engagement letters**, and **Administration → Email Outbox** work across matters and enquiries.
 
@@ -33,13 +33,13 @@ Administrators with multi-factor authentication verified can open **Administrati
 
 ## 3. Automated follow-ups and stopping reminders
 
-Unless your firm disables engagement reminders in tenant configuration, sending a Client Care letter starts an automated follow-up schedule:
+If your firm has turned on engagement reminders, sending a Client Care letter starts an automated follow-up schedule:
 
 1. **First reminder (7 days after sending by default):** Queues a polite reminder email to the recipient asking them to return a signed copy.
 2. **Second reminder (14 days after sending by default):** Queues a second reminder email if the letter is still unsigned.
-3. **Fee-earner escalation task (21 days after sending by default):** Creates an open follow-up task assigned to the matter’s active fee earner (or supervisor/partner with matter access) so the team can contact the client directly.
+3. **Fee-earner escalation task (21 days after sending by default):** Creates an open follow-up task assigned to the matter’s active fee earner (or supervisor, partner, or team lead permitted to access the matter) so the team can contact the client directly. If no authorised owner is available — for example, on a restricted matter where permitted staff are unavailable — the panel displays **Follow-up needs an owner** and records an audit entry instead of disclosing the matter to an unauthorised person.
 
-- **Automatic stop:** As soon as a signed engagement copy is uploaded and recorded, active reminders stop automatically.
+- **Automatic stop:** Uploading and recording a signed engagement copy, or closing or archiving the matter, stops active reminders automatically.
 - **Manual stop:** While reminders remain active, authorised users can click **Stop chasing** on the **Client Care & engagement letter** panel to halt further reminders at any time.
 - **Re-sending starts a fresh schedule:** Sending a fresh Client Care letter later starts a clean reminder cycle for the new dispatch without colliding with earlier stopped reminders.
 
