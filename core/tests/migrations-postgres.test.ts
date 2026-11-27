@@ -4467,7 +4467,7 @@ describe('S0-14: Real PostgreSQL 16 TenantScopedRepository, SET LOCAL ROLE, R402
           requestedAt: '2026-11-27T10:00:00.000Z',
           requestedByPersonId: 'P-000002',
           bankDetailsSnapshot: {
-            accountName: 'Not A Law Firm LLP — Client Account (DEMO ONLY)',
+            accountName: 'Alpha Demo Practice LLP — Client Account (DEMO ONLY)',
             bankName: 'Example Clearing Bank plc',
             sortCode: '00-00-00',
             accountNumber: '00000000',
@@ -4489,7 +4489,7 @@ describe('S0-14: Real PostgreSQL 16 TenantScopedRepository, SET LOCAL ROLE, R402
             recipientName: 'Alpha Client',
             status: 'requested',
             bankDetailsSnapshot: {
-              accountName: 'Not A Law Firm LLP — Client Account (DEMO ONLY)',
+              accountName: 'Alpha Demo Practice LLP — Client Account (DEMO ONLY)',
               bankName: 'Example Clearing Bank plc',
               sortCode: '00-00-00',
               accountNumber: '00000000',

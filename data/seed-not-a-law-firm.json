@@ -26206,7 +26206,7 @@
           "requireCddComplete": true,
           "allowCddOverride": false,
           "requireEngagementSigned": false,
-          "requireFundsOnAccount": false
+          "requireFundsOnAccount": true
         },
         "priceTransparency": {
           "headlineSummary": "Residential conveyancing fees cover standard legal work on a freehold or leasehold sale, purchase, or remortgage, billed on the basis shown above plus statutory searches, Land Registry fees, and VAT.",
@@ -26494,7 +26494,7 @@
           "requireCddComplete": true,
           "allowCddOverride": true,
           "requireEngagementSigned": true,
-          "requireFundsOnAccount": false
+          "requireFundsOnAccount": true
         }
       },
       {
@@ -26507,7 +26507,7 @@
           "requireCddComplete": true,
           "allowCddOverride": true,
           "requireEngagementSigned": true,
-          "requireFundsOnAccount": false
+          "requireFundsOnAccount": true
         },
         "priceTransparency": {
           "headlineSummary": "Pre-action dispute resolution and uncontested debt recovery services are tailored to claim value, evidence complexity, and whether formal court proceedings are required.",
@@ -26534,7 +26534,7 @@
           "requireCddComplete": true,
           "allowCddOverride": true,
           "requireEngagementSigned": true,
-          "requireFundsOnAccount": false
+          "requireFundsOnAccount": true
         },
         "feeArrangementCapCategories": {
           "conditional_fee_agreement": "cfa_general_civil",
@@ -26551,7 +26551,7 @@
           "requireCddComplete": true,
           "allowCddOverride": true,
           "requireEngagementSigned": true,
-          "requireFundsOnAccount": false
+          "requireFundsOnAccount": true
         }
       },
       {
@@ -26564,7 +26564,7 @@
           "requireCddComplete": true,
           "allowCddOverride": true,
           "requireEngagementSigned": true,
-          "requireFundsOnAccount": false
+          "requireFundsOnAccount": true
         }
       },
       {
@@ -26577,7 +26577,7 @@
           "requireCddComplete": true,
           "allowCddOverride": true,
           "requireEngagementSigned": true,
-          "requireFundsOnAccount": false
+          "requireFundsOnAccount": true
         }
       },
       {
@@ -26590,7 +26590,7 @@
           "requireCddComplete": true,
           "allowCddOverride": true,
           "requireEngagementSigned": true,
-          "requireFundsOnAccount": false
+          "requireFundsOnAccount": true
         }
       },
       {
@@ -26603,7 +26603,7 @@
           "requireCddComplete": true,
           "allowCddOverride": true,
           "requireEngagementSigned": true,
-          "requireFundsOnAccount": false
+          "requireFundsOnAccount": true
         }
       },
       {

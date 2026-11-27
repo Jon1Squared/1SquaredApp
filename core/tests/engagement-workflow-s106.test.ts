@@ -3432,7 +3432,7 @@ describe('S1-06: Client Care dispatch, Monotonic B2, R817 purpose decoupling, R8
     expect(orphanAfterJob?.nextActionAt).toBeNull();
   }, 60_000);
 
-  it('12. R843 & R844: moa_receipt is refused until S1-08 and invalid/expired/cross-tenant/cross-user download tokens return opaque 404 matching missing artifacts', async () => {
+  it('12. R843 & R844: moa_receipt upload enforces money_on_account:record_receipt, unknown purpose is refused, and invalid/expired/cross-tenant/cross-user download tokens return opaque 404 matching missing artifacts', async () => {
     await resetAllDemoData('P-000004', testDataResetContext());
     const ctx = testTenantCtx('P-000001');
     const evidenceRepo = new TenantEvidenceArtifactRepository();
@@ -3487,27 +3487,27 @@ describe('S1-06: Client Care dispatch, Monotonic B2, R817 purpose decoupling, R8
       });
     };
 
-    // R843: moa_receipt upload returns exact same refusal as any other disallowed purpose
+    // S1-08 (Lesson 7 / R843): moa_receipt upload requires money_on_account:record_receipt; disallowed purpose still returns VALIDATION_ERROR
     const moaUploadReq = await buildUploadReq('moa_receipt');
     const unknownUploadReq = await buildUploadReq('general');
     const moaUploadRes = await runAsActionActor(
-      'P-000001',
+      'P-000002',
       () => evidenceUploadRoute.POST(moaUploadReq),
-      { roles: ['partner'], mfaVerified: false },
+      { roles: ['fee_earner'], mfaVerified: false },
     );
     const unknownUploadRes = await runAsActionActor(
       'P-000001',
       () => evidenceUploadRoute.POST(unknownUploadReq),
       { roles: ['partner'], mfaVerified: false },
     );
-    expect(moaUploadRes.status).toBe(400);
+    expect(moaUploadRes.status).toBe(403);
     expect(unknownUploadRes.status).toBe(400);
     const moaUploadJson = (await moaUploadRes.json()) as { ok: boolean; code: string };
     const unknownUploadJson = (await unknownUploadRes.json()) as {
       ok: boolean;
       code: string;
     };
-    expect(moaUploadJson.code).toBe('VALIDATION_ERROR');
+    expect(moaUploadJson.code).toBe('FORBIDDEN');
     expect(unknownUploadJson.code).toBe('VALIDATION_ERROR');
     expect(
       await evidenceRepo.listArtifactsForSubject(ctx, {
@@ -3591,7 +3591,7 @@ describe('S1-06: Client Care dispatch, Monotonic B2, R817 purpose decoupling, R8
       error: 'Evidence file not found or access denied.',
     });
 
-    // R843: stored moa_receipt artifact returns identical 404 as missing artifact
+    // S1-08 (Lesson 7 / R843): stored moa_receipt artifact downloads cleanly for partner with access
     const moaDownloadRes = await runAsActionActor(
       'P-000001',
       () =>
@@ -3603,8 +3603,8 @@ describe('S1-06: Client Care dispatch, Monotonic B2, R817 purpose decoupling, R8
         ),
       { roles: ['partner'], mfaVerified: false },
     );
-    expect(moaDownloadRes.status).toBe(404);
-    expect(await moaDownloadRes.json()).toEqual(missingBody);
+    expect(moaDownloadRes.status).toBe(200);
+    expect(Buffer.from(await moaDownloadRes.arrayBuffer()).toString('utf8')).toContain('%PDF-1.4');
 
     // R844: invalid, expired, cross-tenant, and cross-user tokens return identical 404
     const warnSpy = vi.spyOn(console, 'warn').mockImplementation(() => {});
