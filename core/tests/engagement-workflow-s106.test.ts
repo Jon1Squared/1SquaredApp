@@ -19,6 +19,9 @@ import {
   createDirectMigrationClient,
   loadAndValidateTenantConfig,
   resolveTenantFromVerifiedToken,
+  selectDocumentPdfConverter,
+  type DocumentPdfConverter,
+  type DocumentStorageProvider,
   type TenantContext,
 } from '../src/index';
 import { addDays } from '@/domain/dates';
@@ -59,6 +62,7 @@ import {
   saveMatterRecord,
   saveEnquiryRecord,
   sendEngagementLetterRecord,
+  sendNonEngagementLetterRecord,
   startOrLoadClientCddRecord,
   stopCommunicationChaseRecord,
   uploadEvidenceArtifactRecord,
@@ -2238,4 +2242,408 @@ describe('S1-06: Client Care dispatch, Monotonic B2, R817 purpose decoupling, R8
     expect(sendForged.outboxRecord.subject).not.toContain('unable to act');
     expect(sendForged.outboxRecord.subject).toContain('Not A Law Firm LLP');
   }, 45_000);
+
+  it('9. R835: engagement & non-engagement sends are end-to-end idempotent across retries and concurrent races', async () => {
+    await resetAllDemoData('P-000004', testDataResetContext());
+    const ctx = testTenantCtx('P-000001');
+    const engRepo = new TenantEngagementRepository();
+    const outboxRepo = new TenantOutboxRepository();
+    const checkRepo = new TenantIntakeCheckRepository();
+    const auditRepo = new TenantAuditRepository();
+    const chasingRepo = new TenantChasingRepository();
+
+    const activeCfg = getActiveTenantConfiguration();
+    const chaseEnabledCfg = loadAndValidateTenantConfig(
+      {
+        ...(notALawFirmBaseConfig as unknown as Record<string, unknown>),
+        tenantId: 'not-a-law-firm',
+        integrations: {
+          ...((notALawFirmBaseConfig as unknown as { integrations: Record<string, unknown> })
+            .integrations ?? {}),
+          email: { provider: 'disabled' },
+        },
+        chasing: {
+          engagementLetter: {
+            enabled: true,
+            sendEmails: true,
+            firstChaseDays: 7,
+            secondChaseDays: 14,
+            escalateTaskDays: 21,
+          },
+          quote: {
+            enabled: false,
+            sendEmails: false,
+            firstChaseDays: 7,
+            secondChaseDays: 14,
+            escalateTaskDays: 21,
+          },
+          moneyOnAccount: {
+            enabled: false,
+            sendEmails: false,
+            firstChaseDays: 7,
+            secondChaseDays: 14,
+            escalateTaskDays: 21,
+          },
+        },
+      },
+      { tenantId: 'not-a-law-firm', environment: 'test' },
+      'test',
+    );
+
+    // 1. Sequential retry idempotency on Client Care send
+    let matterSeqId = '';
+    let matterRaceId = '';
+    await runAsActionActor(
+      'P-000001',
+      async () => {
+        for (const label of ['Seq', 'Race']) {
+          const m = await saveMatterRecord(
+            {
+              title: `R835 Idempotent Matter ${label}`,
+              clientId: 'O-000001',
+              practiceAreaId: 'work_type.employment_and_hr',
+              workTypeSubcategoryId: 'work_type.employment_and_hr_tribunal_claims',
+              responsiblePartnerId: 'P-000001',
+              supervisingPartnerId: 'P-000001',
+              leadFeeEarnerId: 'P-000002',
+              teamMemberIds: ['P-000001', 'P-000002'],
+              conflictCheckRecord: makeConflictRecord('P-000001', `R835 ${label}`),
+              riskAssessment: { answers: BASE_LOW_RISK_ANSWERS },
+            },
+            { byId: 'P-000001', saveMode: 'submit_cleared' },
+          );
+          expect(m.errors).toBeUndefined();
+          if (label === 'Seq') matterSeqId = m.matter!.id;
+          else matterRaceId = m.matter!.id;
+        }
+      },
+      { roles: ['partner'], mfaVerified: false },
+    );
+
+    const realPdf = selectDocumentPdfConverter(activeCfg, {
+      converterUrl: process.env.DOC_CONVERTER_URL,
+    });
+    const realStorage = getDocumentStorage(activeCfg);
+
+    let seqConvertCalls = 0;
+    let seqPutObjectCalls = 0;
+    const spyPdf: DocumentPdfConverter = {
+      converterId: realPdf.converterId,
+      convertDocxToPdf: async (req) => {
+        seqConvertCalls += 1;
+        return realPdf.convertDocxToPdf(req);
+      },
+    };
+    const spyStorage: DocumentStorageProvider = {
+      providerId: realStorage.providerId,
+      putObject: async (c, req) => {
+        seqPutObjectCalls += 1;
+        return realStorage.putObject(c, req);
+      },
+      getObjectBytes: (c, ref) => realStorage.getObjectBytes(c, ref),
+      issueScopedDownloadToken: (c, ref, ttl) =>
+        realStorage.issueScopedDownloadToken(c, ref, ttl),
+      verifyScopedDownloadToken: (c, tok) =>
+        realStorage.verifyScopedDownloadToken(c, tok),
+      deleteObject: (c, ref) => realStorage.deleteObject(c, ref),
+      getMalwareScanStatus: (c, key) => realStorage.getMalwareScanStatus(c, key),
+    };
+
+    const sharedKeySeq = 'r835-seq-ccl-key-1';
+    const sendSeq1 = await runAsActionActor(
+      'P-000001',
+      () =>
+        sendEngagementLetterRecord(
+          {
+            matterId: matterSeqId,
+            recipientEmail: 'r835-seq@example.test',
+            idempotencyKey: sharedKeySeq,
+          },
+          'P-000001',
+          {
+            tenantConfig: chaseEnabledCfg,
+            pdfConverter: spyPdf,
+            storageProvider: spyStorage,
+            drainAfterCommit: false,
+          },
+        ),
+      { roles: ['partner'], mfaVerified: false },
+    );
+    expect(sendSeq1.ok).toBe(true);
+    if (!sendSeq1.ok) return;
+
+    const sendSeq2 = await runAsActionActor(
+      'P-000001',
+      () =>
+        sendEngagementLetterRecord(
+          {
+            matterId: matterSeqId,
+            recipientEmail: 'r835-seq@example.test',
+            idempotencyKey: sharedKeySeq,
+          },
+          'P-000001',
+          {
+            tenantConfig: chaseEnabledCfg,
+            pdfConverter: spyPdf,
+            storageProvider: spyStorage,
+            drainAfterCommit: false,
+          },
+        ),
+      { roles: ['partner'], mfaVerified: false },
+    );
+    expect(sendSeq2.ok).toBe(true);
+    if (!sendSeq2.ok) return;
+
+    expect(sendSeq2.documentId).toBe(sendSeq1.documentId);
+    expect(sendSeq2.dispatch.id).toBe(sendSeq1.dispatch.id);
+    expect(sendSeq2.outboxRecord.id).toBe(sendSeq1.outboxRecord.id);
+    expect(sendSeq2.chase?.id).toBe(sendSeq1.chase?.id);
+    // Second call returns early pre-TX with ZERO extra PDF/blob work
+    expect(seqConvertCalls).toBe(1);
+    expect(seqPutObjectCalls).toBe(1);
+
+    const direct = await createDirectMigrationClient({ ctx });
+    try {
+      const docCountRes = await direct.query<{ cnt: string }>(
+        `SELECT COUNT(*)::text AS cnt FROM public.documents WHERE tenant_id = $1 AND primary_matter_id = $2`,
+        [ctx.tenantId, matterSeqId],
+      );
+      expect(Number(docCountRes.rows[0]?.cnt)).toBe(1);
+
+      const linkCountRes = await direct.query<{ cnt: string }>(
+        `SELECT COUNT(*)::text AS cnt FROM public.document_links WHERE tenant_id = $1 AND entity_type = 'matter' AND entity_id = $2`,
+        [ctx.tenantId, matterSeqId],
+      );
+      expect(Number(linkCountRes.rows[0]?.cnt)).toBe(1);
+
+      const outboxCountRes = await direct.query<{ cnt: string }>(
+        `SELECT COUNT(*)::text AS cnt FROM public.email_outbox WHERE tenant_id = $1 AND matter_id = $2`,
+        [ctx.tenantId, matterSeqId],
+      );
+      expect(Number(outboxCountRes.rows[0]?.cnt)).toBe(1);
+
+      const dispSeq = await engRepo.listDispatchesForMatter(ctx, matterSeqId);
+      expect(dispSeq).toHaveLength(1);
+
+      const checksSeq = await checkRepo.listChecksForSubject(ctx, {
+        subjectType: 'matter',
+        subjectId: matterSeqId,
+      });
+      expect(
+        checksSeq.filter(
+          (c) => c.checkKind === 'e_signature' && c.outcome === 'requested_manual',
+        ),
+      ).toHaveLength(1);
+
+      const chasesSeq = await chasingRepo.listChasesForMatter(ctx, matterSeqId);
+      expect(chasesSeq).toHaveLength(1);
+
+      const matterAuditsSeq = await auditRepo.listAuditEntriesForRecord(
+        ctx,
+        'matter',
+        matterSeqId,
+        { limit: 100 },
+      );
+      expect(
+        matterAuditsSeq.filter((a) => a.field === 'Engagement letter sent'),
+      ).toHaveLength(1);
+
+      // 2. Concurrent race idempotency on Client Care send (in-TX FOR UPDATE + early return)
+      const sharedKeyRace = 'r835-race-ccl-key-1';
+      const [race1, race2] = await Promise.all([
+        runAsActionActor(
+          'P-000001',
+          () =>
+            sendEngagementLetterRecord(
+              {
+                matterId: matterRaceId,
+                recipientEmail: 'r835-race@example.test',
+                idempotencyKey: sharedKeyRace,
+              },
+              'P-000001',
+              { tenantConfig: chaseEnabledCfg, drainAfterCommit: false },
+            ),
+          { roles: ['partner'], mfaVerified: false },
+        ),
+        runAsActionActor(
+          'P-000001',
+          () =>
+            sendEngagementLetterRecord(
+              {
+                matterId: matterRaceId,
+                recipientEmail: 'r835-race@example.test',
+                idempotencyKey: sharedKeyRace,
+              },
+              'P-000001',
+              { tenantConfig: chaseEnabledCfg, drainAfterCommit: false },
+            ),
+          { roles: ['partner'], mfaVerified: false },
+        ),
+      ]);
+      expect(race1.ok).toBe(true);
+      expect(race2.ok).toBe(true);
+      if (race1.ok && race2.ok) {
+        expect(race2.documentId).toBe(race1.documentId);
+        expect(race2.dispatch.id).toBe(race1.dispatch.id);
+        expect(race2.outboxRecord.id).toBe(race1.outboxRecord.id);
+      }
+      expect(await engRepo.listDispatchesForMatter(ctx, matterRaceId)).toHaveLength(1);
+      const raceChecks = await checkRepo.listChecksForSubject(ctx, {
+        subjectType: 'matter',
+        subjectId: matterRaceId,
+      });
+      expect(
+        raceChecks.filter(
+          (c) => c.checkKind === 'e_signature' && c.outcome === 'requested_manual',
+        ),
+      ).toHaveLength(1);
+
+      // 3. Non-engagement letter idempotency (incl. single doc, single task closure, single audit)
+      const enqSave = await runAsActionActor(
+        'P-000002',
+        () =>
+          saveEnquiryRecord(
+            {
+              firstName: 'R835',
+              lastName: 'NonEng',
+              email: 'r835-noneng@example.test',
+              phone: '029 2000 0835',
+              channelId: 'enquiry_channel.phone',
+              practiceAreaId: 'work_type.employment_and_hr',
+              summary: 'Idempotency test enquiry',
+              notes: 'Notes for R835 idempotent non-engagement.',
+              privacyNoticeGiven: true,
+            },
+            { byId: 'P-000002' },
+          ),
+        { roles: ['fee_earner'], mfaVerified: false },
+      );
+      expect(enqSave.errors).toBeUndefined();
+      const enqId = enqSave.enquiry!.id;
+
+      const closeRes = await runAsActionActor(
+        'P-000002',
+        () =>
+          closeEnquiryRecord(
+            enqId,
+            {
+              targetStatus: 'Declined',
+              closeReasonId: vid('enquiry_close_reason', 'Outside our expertise'),
+              closeNotes: 'Not within current expertise.',
+            },
+            'P-000002',
+          ),
+        { roles: ['fee_earner'], mfaVerified: false },
+      );
+      expect(closeRes.error).toBeUndefined();
+      const nonEngTaskId = closeRes.nonEngagementTask!.id;
+
+      let nonEngConvertCalls = 0;
+      let nonEngPutObjectCalls = 0;
+      const nonEngSpyPdf: DocumentPdfConverter = {
+        converterId: realPdf.converterId,
+        convertDocxToPdf: async (req) => {
+          nonEngConvertCalls += 1;
+          return realPdf.convertDocxToPdf(req);
+        },
+      };
+      const nonEngSpyStorage: DocumentStorageProvider = {
+        ...spyStorage,
+        putObject: async (c, req) => {
+          nonEngPutObjectCalls += 1;
+          return realStorage.putObject(c, req);
+        },
+      };
+
+      const sharedNonEngKey = 'r835-noneng-key-1';
+      const ne1 = await runAsActionActor(
+        'P-000002',
+        () =>
+          sendNonEngagementLetterRecord(
+            { enquiryId: enqId, idempotencyKey: sharedNonEngKey },
+            'P-000002',
+            {
+              pdfConverter: nonEngSpyPdf,
+              storageProvider: nonEngSpyStorage,
+              drainAfterCommit: false,
+            },
+          ),
+        { roles: ['fee_earner'], mfaVerified: false },
+      );
+      expect(ne1.ok).toBe(true);
+      if (!ne1.ok) return;
+      expect(ne1.closedTaskIds).toEqual([nonEngTaskId]);
+
+      const ne2 = await runAsActionActor(
+        'P-000002',
+        () =>
+          sendNonEngagementLetterRecord(
+            { enquiryId: enqId, idempotencyKey: sharedNonEngKey },
+            'P-000002',
+            {
+              pdfConverter: nonEngSpyPdf,
+              storageProvider: nonEngSpyStorage,
+              drainAfterCommit: false,
+            },
+          ),
+        { roles: ['fee_earner'], mfaVerified: false },
+      );
+      expect(ne2.ok).toBe(true);
+      if (!ne2.ok) return;
+
+      expect(ne2.documentId).toBe(ne1.documentId);
+      expect(ne2.dispatch.id).toBe(ne1.dispatch.id);
+      expect(ne2.outboxRecord.id).toBe(ne1.outboxRecord.id);
+      expect(ne2.closedTaskIds).toEqual([]);
+      expect(nonEngConvertCalls).toBe(1);
+      expect(nonEngPutObjectCalls).toBe(1);
+
+      const neDocCount = await direct.query<{ cnt: string }>(
+        `SELECT COUNT(*)::text AS cnt FROM public.documents WHERE tenant_id = $1 AND primary_enquiry_id = $2`,
+        [ctx.tenantId, enqId],
+      );
+      expect(Number(neDocCount.rows[0]?.cnt)).toBe(1);
+      const neLinkCount = await direct.query<{ cnt: string }>(
+        `SELECT COUNT(*)::text AS cnt FROM public.document_links WHERE tenant_id = $1 AND entity_type = 'enquiry' AND entity_id = $2`,
+        [ctx.tenantId, enqId],
+      );
+      expect(Number(neLinkCount.rows[0]?.cnt)).toBe(1);
+      expect(await engRepo.listDispatchesForEnquiry(ctx, enqId)).toHaveLength(1);
+
+      const neOutboxCount = await direct.query<{ cnt: string }>(
+        `SELECT COUNT(*)::text AS cnt FROM public.email_outbox WHERE tenant_id = $1 AND enquiry_id = $2`,
+        [ctx.tenantId, enqId],
+      );
+      expect(Number(neOutboxCount.rows[0]?.cnt)).toBe(1);
+      const loadedOutbox = await outboxRepo.getOutboxRecordById(
+        ctx,
+        ne1.outboxRecord.id,
+      );
+      expect(loadedOutbox?.id).toBe(ne1.outboxRecord.id);
+
+      const enqAudits = await auditRepo.listAuditEntriesForRecord(
+        ctx,
+        'enquiry',
+        enqId,
+        { limit: 100 },
+      );
+      expect(
+        enqAudits.filter((a) => a.field === 'Non-engagement letter sent'),
+      ).toHaveLength(1);
+
+      const taskAudits = await auditRepo.listAuditEntriesForRecord(
+        ctx,
+        'task',
+        nonEngTaskId,
+        { limit: 100 },
+      );
+      expect(
+        taskAudits.filter(
+          (a) => a.field === 'Task completed on non-engagement letter dispatch',
+        ),
+      ).toHaveLength(1);
+    } finally {
+      await direct.end();
+    }
+  }, 60_000);
 });

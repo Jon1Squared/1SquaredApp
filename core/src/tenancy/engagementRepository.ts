@@ -91,6 +91,15 @@ export class TenantEngagementRepository extends TenantScopedRepository {
     return mapDispatchRow(row);
   }
 
+  public async getDispatchByIdempotencyKey(
+    ctx: TenantContext,
+    idempotencyKey: string,
+  ): Promise<EngagementDispatchRecord | null> {
+    return this.withTenantReadTransaction(ctx, async (tx) =>
+      this.getDispatchByIdempotencyKeyInTx(tx, ctx, idempotencyKey),
+    );
+  }
+
   public async createDispatchInTx(
     tx: TenantSqlClient,
     ctx: TenantContext,

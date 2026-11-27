@@ -1162,26 +1162,34 @@ export class TenantOutboxRepository extends TenantScopedRepository {
     });
   }
 
+  public async getOutboxRecordByIdInTx(
+    tx: TenantSqlClient,
+    ctx: TenantContext,
+    id: string,
+  ): Promise<EmailOutboxRecord | null> {
+    const res = await tx.query<DbEmailOutboxRow>(
+      `SELECT *
+         FROM public.email_outbox
+        WHERE tenant_id = $1
+          AND id = $2
+        LIMIT 1`,
+      [ctx.tenantId, id],
+    );
+    const row = res.rows[0];
+    if (!row) {
+      return null;
+    }
+    this.assertRowTenant(ctx, row.tenant_id, 'EmailOutbox');
+    return mapOutboxRow(row);
+  }
+
   public async getOutboxRecordById(
     ctx: TenantContext,
     id: string,
   ): Promise<EmailOutboxRecord | null> {
-    return this.withTenantReadTransaction(ctx, async (tx) => {
-      const res = await tx.query<DbEmailOutboxRow>(
-        `SELECT *
-           FROM public.email_outbox
-          WHERE tenant_id = $1
-            AND id = $2
-          LIMIT 1`,
-        [ctx.tenantId, id],
-      );
-      const row = res.rows[0];
-      if (!row) {
-        return null;
-      }
-      this.assertRowTenant(ctx, row.tenant_id, 'EmailOutbox');
-      return mapOutboxRow(row);
-    });
+    return this.withTenantReadTransaction(ctx, async (tx) =>
+      this.getOutboxRecordByIdInTx(tx, ctx, id),
+    );
   }
 
   public async listOutboxRecords(

@@ -38161,6 +38161,45 @@ export async function sendEngagementLetterRecord(
       );
     }
 
+    const outboxRepo = getOutboxRepository();
+    const engagementRepo = getEngagementRepository();
+    const chasingRepo = getChasingRepository();
+    const cleanExplicitKey = input.idempotencyKey?.trim() || '';
+    const dispatchKey = cleanExplicitKey || randomUUID();
+    const outboxIdempotencyKey = `engagement:client_care:${matterPre.id}:${dispatchKey}`;
+    const emailProviderDisabled =
+      (resolveEmailIntegrationConfig(tenantCfg).provider ?? 'disabled') ===
+      'disabled';
+
+    if (cleanExplicitKey) {
+      const existingDispatch = await engagementRepo.getDispatchByIdempotencyKey(
+        ctx,
+        outboxIdempotencyKey,
+      );
+      if (existingDispatch) {
+        const [existingOutbox, existingChase] = await Promise.all([
+          existingDispatch.outboxEmailId
+            ? outboxRepo.getOutboxRecordById(ctx, existingDispatch.outboxEmailId)
+            : Promise.resolve(null),
+          chasingRepo.getActiveChaseForEntity(ctx, {
+            entityKind: 'engagement_letter',
+            entityId: matterPre.id,
+          }),
+        ]);
+        if (existingOutbox) {
+          return {
+            ok: true,
+            matter: matterPre,
+            dispatch: existingDispatch,
+            chase: existingChase,
+            outboxRecord: existingOutbox,
+            emailProviderDisabled,
+            documentId: existingDispatch.documentId ?? '',
+          };
+        }
+      }
+    }
+
     const partyRepo = getPartyRepository();
     const [clientPerson, clientOrg, instructingPerson] = await Promise.all([
       matterPre.clientId.startsWith('P-')
@@ -38455,13 +38494,7 @@ export async function sendEngagementLetterRecord(
       };
     }
 
-    const outboxRepo = getOutboxRepository();
-    const engagementRepo = getEngagementRepository();
-    const chasingRepo = getChasingRepository();
     const intakeCheckRepo = getIntakeCheckRepository();
-
-    const dispatchKey = input.idempotencyKey?.trim() || randomUUID();
-    const outboxIdempotencyKey = `engagement:client_care:${matterPre.id}:${dispatchKey}`;
 
     const txResult = await matterRepo.withTenantTransaction(ctx, async (tx) => {
       await tx.query(
@@ -38481,6 +38514,39 @@ export async function sendEngagementLetterRecord(
           'VALIDATION_ERROR',
           'The engagement letter has already been signed for this matter.',
         );
+      }
+
+      const existingInTx = await engagementRepo.getDispatchByIdempotencyKeyInTx(
+        tx,
+        ctx,
+        outboxIdempotencyKey,
+      );
+      if (existingInTx) {
+        const existingOutboxInTx = existingInTx.outboxEmailId
+          ? await outboxRepo.getOutboxRecordByIdInTx(
+              tx,
+              ctx,
+              existingInTx.outboxEmailId,
+            )
+          : null;
+        if (existingOutboxInTx) {
+          const existingChaseInTx = await chasingRepo.getActiveChaseForEntity(
+            ctx,
+            {
+              entityKind: 'engagement_letter',
+              entityId: lockedMatter.id,
+            },
+          );
+          return {
+            ok: true as const,
+            earlyReturn: true as const,
+            matter: lockedMatter,
+            dispatch: existingInTx,
+            chase: existingChaseInTx,
+            outboxRecord: existingOutboxInTx,
+            documentId: existingInTx.documentId ?? documentId,
+          };
+        }
       }
 
       const nowIso = nextMonotonicIsoTimestamp(lockedMatter.updatedAt);
@@ -38628,10 +38694,12 @@ export async function sendEngagementLetterRecord(
 
       return {
         ok: true as const,
+        earlyReturn: false as const,
         matter: savedMatter,
         dispatch: dispatchRes.record,
         chase: chaseRecord,
         outboxRecord: queued.record,
+        documentId,
       };
     });
 
@@ -38639,11 +38707,9 @@ export async function sendEngagementLetterRecord(
       return txResult;
     }
 
-    const emailProviderDisabled =
-      (resolveEmailIntegrationConfig(tenantCfg).provider ?? 'disabled') ===
-      'disabled';
     let finalOutboxRecord = txResult.outboxRecord;
     if (
+      !txResult.earlyReturn &&
       options?.drainAfterCommit !== false &&
       !emailProviderDisabled &&
       !hasActiveTenantTransaction(ctx)
@@ -38677,7 +38743,7 @@ export async function sendEngagementLetterRecord(
       chase: txResult.chase,
       outboxRecord: finalOutboxRecord,
       emailProviderDisabled,
-      documentId,
+      documentId: txResult.documentId,
     };
   } catch (err) {
     return mapRegisterErrorToDenial(err);
@@ -38899,6 +38965,40 @@ export async function sendNonEngagementLetterRecord(
       );
     }
 
+    const outboxRepo = getOutboxRepository();
+    const engagementRepo = getEngagementRepository();
+    const cleanExplicitKey = input.idempotencyKey?.trim() || '';
+    const dispatchKey = cleanExplicitKey || randomUUID();
+    const outboxIdempotencyKey = `engagement:non_engagement:${enquiryPre.id}:${dispatchKey}`;
+    const emailProviderDisabled =
+      (resolveEmailIntegrationConfig(tenantCfg).provider ?? 'disabled') ===
+      'disabled';
+
+    if (cleanExplicitKey) {
+      const existingDispatch = await engagementRepo.getDispatchByIdempotencyKey(
+        ctx,
+        outboxIdempotencyKey,
+      );
+      if (existingDispatch) {
+        const existingOutbox = existingDispatch.outboxEmailId
+          ? await outboxRepo.getOutboxRecordById(
+              ctx,
+              existingDispatch.outboxEmailId,
+            )
+          : null;
+        if (existingOutbox) {
+          return {
+            ok: true,
+            dispatch: existingDispatch,
+            outboxRecord: existingOutbox,
+            documentId: existingDispatch.documentId ?? '',
+            closedTaskIds: [],
+            emailProviderDisabled,
+          };
+        }
+      }
+    }
+
     const partyRepo = getPartyRepository();
     const linkedPerson = enquiryPre.linkedPersonId
       ? await partyRepo.getPersonById<Person>(ctx, enquiryPre.linkedPersonId)
@@ -39008,16 +39108,41 @@ export async function sendNonEngagementLetterRecord(
       .join('');
 
     const docRepo = getDocumentRepository();
-    const outboxRepo = getOutboxRepository();
-    const engagementRepo = getEngagementRepository();
     const taskRepo = getTaskWorkflowRepository();
 
     const sysTplId = `TPL-SYS-NON-ENG-${sanitizeTemplateIdSuffix(ctx.tenantId)}`;
     const sysVerId = `${sysTplId}-V1`;
-    const dispatchKey = input.idempotencyKey?.trim() || randomUUID();
-    const outboxIdempotencyKey = `engagement:non_engagement:${enquiryPre.id}:${dispatchKey}`;
 
     const txResult = await intakeRepo.withTenantTransaction(ctx, async (tx) => {
+      await tx.query(
+        'SELECT id FROM public.enquiries WHERE tenant_id = $1 AND id = $2 FOR UPDATE',
+        [ctx.tenantId, enquiryPre.id],
+      );
+
+      const existingInTx = await engagementRepo.getDispatchByIdempotencyKeyInTx(
+        tx,
+        ctx,
+        outboxIdempotencyKey,
+      );
+      if (existingInTx) {
+        const existingOutboxInTx = existingInTx.outboxEmailId
+          ? await outboxRepo.getOutboxRecordByIdInTx(
+              tx,
+              ctx,
+              existingInTx.outboxEmailId,
+            )
+          : null;
+        if (existingOutboxInTx) {
+          return {
+            earlyReturn: true as const,
+            dispatch: existingInTx,
+            outboxRecord: existingOutboxInTx,
+            documentId: existingInTx.documentId ?? docId,
+            closedTaskIds: [] as string[],
+          };
+        }
+      }
+
       const nowIso = new Date().toISOString();
       await ensureBuiltInCommunicationTemplateInTx(tx, ctx, docRepo, {
         templateId: sysTplId,
@@ -39100,65 +39225,67 @@ export async function sendNonEngagementLetterRecord(
         idempotencyKey: outboxIdempotencyKey,
       });
 
-      const linkedTasks = await taskRepo.listTasksLinkedToRecord<Task>(
-        ctx,
-        'enquiry',
-        enquiryPre.id,
-      );
       const closedTaskIds: string[] = [];
-      for (const t of linkedTasks) {
-        if (t.autoTrigger === 'non_engagement_letter' && isTaskOpen(t)) {
-          const prevTaskStatus = t.status;
-          const updatedTask: Task = {
-            ...t,
-            status: 'Done',
-            completedAt: nowIso,
-            completedById: actor.id,
-            updatedAt: nowIso,
-            updatedById: actor.id,
-          };
-          await taskRepo.putTask(ctx, updatedTask);
-          closedTaskIds.push(t.id);
-          await appendTenantAuditEntries(ctx, [
-            {
-              recordType: 'task',
-              recordId: t.id,
-              action: 'status-change',
-              field: 'Task completed on non-engagement letter dispatch',
-              oldValue: prevTaskStatus,
-              newValue: 'Done',
-              byId: actor.id,
-              at: nowIso,
-            },
-          ]);
+      if (!dispatchRes.deduplicated) {
+        const linkedTasks = await taskRepo.listTasksLinkedToRecord<Task>(
+          ctx,
+          'enquiry',
+          enquiryPre.id,
+        );
+        for (const t of linkedTasks) {
+          if (t.autoTrigger === 'non_engagement_letter' && isTaskOpen(t)) {
+            const prevTaskStatus = t.status;
+            const updatedTask: Task = {
+              ...t,
+              status: 'Done',
+              completedAt: nowIso,
+              completedById: actor.id,
+              updatedAt: nowIso,
+              updatedById: actor.id,
+            };
+            await taskRepo.putTask(ctx, updatedTask);
+            closedTaskIds.push(t.id);
+            await appendTenantAuditEntries(ctx, [
+              {
+                recordType: 'task',
+                recordId: t.id,
+                action: 'status-change',
+                field: 'Task completed on non-engagement letter dispatch',
+                oldValue: prevTaskStatus,
+                newValue: 'Done',
+                byId: actor.id,
+                at: nowIso,
+              },
+            ]);
+          }
         }
+
+        await appendTenantAuditEntries(ctx, [
+          {
+            recordType: 'enquiry',
+            recordId: enquiryPre.id,
+            action: 'update',
+            field: 'Non-engagement letter sent',
+            oldValue: enquiryPre.status,
+            newValue: `reason=${renderedLetter.reasonKey} dispatch=${dispatchRes.record.id} outbox=${queued.record.id}`,
+            byId: actor.id,
+            at: nowIso,
+          },
+        ]);
       }
 
-      await appendTenantAuditEntries(ctx, [
-        {
-          recordType: 'enquiry',
-          recordId: enquiryPre.id,
-          action: 'update',
-          field: 'Non-engagement letter sent',
-          oldValue: enquiryPre.status,
-          newValue: `reason=${renderedLetter.reasonKey} dispatch=${dispatchRes.record.id} outbox=${queued.record.id}`,
-          byId: actor.id,
-          at: nowIso,
-        },
-      ]);
-
       return {
+        earlyReturn: false as const,
         dispatch: dispatchRes.record,
         outboxRecord: queued.record,
+        documentId: docId,
         closedTaskIds,
       };
     });
 
-    const emailProviderDisabled =
-      (resolveEmailIntegrationConfig(tenantCfg).provider ?? 'disabled') ===
-      'disabled';
     let finalOutboxRecord = txResult.outboxRecord;
     if (
+      !txResult.earlyReturn &&
       options?.drainAfterCommit !== false &&
       !emailProviderDisabled &&
       !hasActiveTenantTransaction(ctx)
@@ -39189,7 +39316,7 @@ export async function sendNonEngagementLetterRecord(
       ok: true,
       dispatch: txResult.dispatch,
       outboxRecord: finalOutboxRecord,
-      documentId: docId,
+      documentId: txResult.documentId,
       closedTaskIds: txResult.closedTaskIds,
       emailProviderDisabled,
     };
