@@ -16,12 +16,14 @@ import type {
   IdentityVerificationOutcome,
   IdentityVerificationProvider,
   IdentityVerificationRecord,
+  IntakeCheckSubjectType,
   IntakeEvidenceArtifactRef,
   PaymentRequestOutcome,
   PaymentRequestProvider,
   PaymentRequestRecord,
   RecordManualESignatureInput,
   RecordManualIdentityVerificationInput,
+  RecordManualPaymentCancellationInput,
   RecordManualPaymentRequestInput,
   RecordManualSanctionsPepInput,
   SanctionsPepOutcome,
@@ -29,6 +31,7 @@ import type {
   SanctionsPepScreeningRecord,
   TenantContext,
 } from '../../api/index';
+import type { TenantSqlClient } from '../../tenancy/tenantScopedRepository';
 import { assertBlobKeyBelongsToTenant } from '../../tenancy/blobStorage';
 import {
   ALLOWED_INTAKE_CHECK_OUTCOMES_BY_KIND,
@@ -454,11 +457,79 @@ export class ManualPaymentRequestProvider implements PaymentRequestProvider {
     return this.recordPaymentEntry(ctx, input, 'receipt_recorded_manual');
   }
 
-  private async recordPaymentEntry(
+  public async recordManualCancellation(
+    ctx: TenantContext,
+    input: RecordManualPaymentCancellationInput,
+  ): Promise<PaymentRequestRecord> {
+    return this.recordPaymentEntry(
+      ctx,
+      {
+        subjectType: input.subjectType,
+        subjectId: input.subjectId,
+        amountMinorUnits: BigInt(0),
+        currency: 'GBP',
+        clientAccountReference: input.clientAccountReference,
+        referenceCode: input.referenceCode ?? null,
+        notes: input.notes ?? null,
+        evidenceRefs: [],
+      },
+      'cancelled',
+    );
+  }
+
+  public async recordCheckInTx(
+    tx: unknown,
+    ctx: TenantContext,
+    input: RecordManualPaymentRequestInput & {
+      readonly outcome?: PaymentRequestOutcome;
+    },
+  ): Promise<PaymentRequestRecord> {
+    const outcome = input.outcome ?? 'requested_manual';
+    this.validatePaymentInput(ctx, input, outcome);
+    const verifiedEvidenceRefs = (input.evidenceRefs ?? []).map((ref) => {
+      if (!ref?.blobKey?.trim()) {
+        throw new IntakeCheckIntegrationError(
+          'INTAKE_CHECK_INVALID_EVIDENCE',
+          'Evidence artifact reference must carry a valid blobKey.',
+        );
+      }
+      assertBlobKeyBelongsToTenant(ctx, ref.blobKey);
+      if (ref.scanStatus !== 'clean') {
+        throw new IntakeCheckIntegrationError(
+          'INTAKE_CHECK_UNSAFE_EVIDENCE',
+          `Evidence artifact cannot be attached while scan status is "${String(ref.scanStatus)}".`,
+        );
+      }
+      return ref;
+    });
+    const saved = await this.deps.repository.recordCheckInTx(
+      tx as TenantSqlClient,
+      ctx,
+      {
+        checkKind: 'payment_request',
+        provider: 'manual',
+        subjectType: input.subjectType,
+        subjectId: input.subjectId,
+        outcome,
+        amountMinorUnits: input.amountMinorUnits,
+        currency: input.currency ?? 'GBP',
+        referenceCode: input.referenceCode ?? null,
+        metadata: {
+          clientAccountReference: input.clientAccountReference.trim(),
+          bankStatementReference: input.bankStatementReference?.trim() || null,
+          notes: input.notes ?? null,
+        },
+        evidenceRefs: verifiedEvidenceRefs,
+      },
+    );
+    return mapPaymentRow(saved);
+  }
+
+  private validatePaymentInput(
     ctx: TenantContext,
     input: RecordManualPaymentRequestInput,
     outcome: PaymentRequestOutcome,
-  ): Promise<PaymentRequestRecord> {
+  ): void {
     assertValidContext(ctx);
     if (!PAYMENT_OUTCOMES.has(outcome)) {
       throw new IntakeCheckIntegrationError(
@@ -481,6 +552,14 @@ export class ManualPaymentRequestProvider implements PaymentRequestProvider {
         'Client account payment reference is required.',
       );
     }
+  }
+
+  private async recordPaymentEntry(
+    ctx: TenantContext,
+    input: RecordManualPaymentRequestInput,
+    outcome: PaymentRequestOutcome,
+  ): Promise<PaymentRequestRecord> {
+    this.validatePaymentInput(ctx, input, outcome);
     const evidenceRefs = await verifyEvidenceArtifacts(
       ctx,
       this.deps.storageProvider,
@@ -515,5 +594,21 @@ export class ManualPaymentRequestProvider implements PaymentRequestProvider {
       return null;
     }
     return mapPaymentRow(found);
+  }
+
+  public async listPaymentRequestsForSubject(
+    ctx: TenantContext,
+    subject: {
+      readonly subjectType: IntakeCheckSubjectType;
+      readonly subjectId: string;
+    },
+  ): Promise<readonly PaymentRequestRecord[]> {
+    assertValidContext(ctx);
+    const rows = await this.deps.repository.listChecksForSubject(ctx, {
+      checkKind: 'payment_request',
+      subjectType: subject.subjectType,
+      subjectId: subject.subjectId,
+    });
+    return rows.map(mapPaymentRow);
   }
 }

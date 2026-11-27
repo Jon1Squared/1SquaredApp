@@ -5,7 +5,7 @@
  */
 
 export const CORE_VERSION = '1.1.0';
-export const CORE_API_VERSION = '2.5.0';
+export const CORE_API_VERSION = '2.6.0';
 
 import type {
   FeeArrangementCapEntry,
@@ -96,6 +96,9 @@ export type PermissionKey =
   | 'finance:view_matter'
   | 'finance:credit_control'
   | 'finance:manage_links'
+  | 'money_on_account:view'
+  | 'money_on_account:request'
+  | 'money_on_account:record_receipt'
   | 'risk:view'
   | 'matter:create'
   | 'matter:edit'
@@ -946,6 +949,7 @@ export interface TenantConfiguration {
   cdd?: CddConfiguration;
   chasing?: ChasingConfiguration;
   engagement?: EngagementConfiguration;
+  moneyOnAccount?: MoneyOnAccountConfiguration;
 }
 
 // ------------------------------------------------------------------ Communication Chasing & Engagement Config (ADR 0042, S1-06)
@@ -994,6 +998,32 @@ export interface EngagementConfiguration {
   readonly clientCareTermsSummary: string;
   readonly clientCareSignatureInstruction: string;
   readonly nonEngagementWording: NonEngagementWordingMap;
+}
+
+// ------------------------------------------------------------------ Money on Account Configuration (ADR 0043, S1-08)
+
+export interface BankAccountDetailsConfig {
+  readonly accountName: string;
+  readonly bankName: string;
+  readonly sortCode: string;
+  readonly accountNumber: string;
+  readonly iban: string;
+  readonly bic: string;
+  readonly allowDemoPlaceholderDetails: boolean;
+}
+
+export interface MoneyOnAccountRequestWordingsConfig {
+  readonly introductoryParagraph: string;
+  readonly bankTransferInstruction: string;
+  readonly clientMoneyComplianceNote: string;
+}
+
+export interface MoneyOnAccountConfiguration {
+  readonly enabled: boolean;
+  readonly clientAccount: BankAccountDetailsConfig;
+  readonly requestEmailSubjectTemplate: string;
+  readonly requestWordings: MoneyOnAccountRequestWordingsConfig;
+  readonly paymentReferencePrefix: string;
 }
 
 // ------------------------------------------------------------------ Client Due Diligence Configuration (ADR 0039, S1-04)
@@ -2001,6 +2031,9 @@ export type FirmAuditRecordType =
   | 'communication_chase'
   | 'engagement_config'
   | 'chasing_config'
+  | 'money_on_account_request'
+  | 'money_on_account_receipt'
+  | 'money_on_account_config'
   | 'notification_digest'
   | 'notification_preferences';
 
@@ -2787,6 +2820,71 @@ export interface RecordManualPaymentRequestInput {
   readonly evidenceRefs?: readonly IntakeEvidenceArtifactRef[];
 }
 
+export type MoneyOnAccountRequestStatus =
+  | 'draft'
+  | 'requested'
+  | 'part_received'
+  | 'received'
+  | 'cancelled';
+
+export type MoneyOnAccountReceiptSource = 'manual' | 'pms_ledger';
+
+export interface MoneyOnAccountRequestRecord {
+  readonly id: string;
+  readonly tenantId: string;
+  readonly matterId: string;
+  readonly quoteId: string | null;
+  readonly paymentReference: string;
+  readonly requestedAmountPence: number;
+  readonly currency: 'GBP';
+  readonly recipientEmail: string;
+  readonly recipientName: string;
+  readonly status: MoneyOnAccountRequestStatus;
+  readonly requestedAt: string | null;
+  readonly requestedByPersonId: string | null;
+  readonly outboxEmailId: string | null;
+  readonly bankDetailsSnapshot: BankAccountDetailsConfig;
+  readonly intakeCheckRecordId: string | null;
+  readonly notes: string | null;
+  readonly cancelledAt: string | null;
+  readonly cancelledByPersonId: string | null;
+  readonly cancellationReason: string | null;
+  readonly idempotencyKey: string | null;
+  readonly rowVersion: number;
+  readonly createdByPersonId: string;
+  readonly createdAt: string;
+  readonly updatedAt: string;
+}
+
+export interface MoneyOnAccountReceiptRecord {
+  readonly id: string;
+  readonly tenantId: string;
+  readonly requestId: string;
+  readonly matterId: string;
+  readonly source: MoneyOnAccountReceiptSource;
+  readonly amountPence: number;
+  readonly receivedDate: string;
+  readonly bankReference: string | null;
+  readonly notes: string | null;
+  readonly pmsTransactionId: string | null;
+  readonly pmsMatterCode: string | null;
+  readonly intakeCheckRecordId: string | null;
+  readonly evidenceArtifactId: string | null;
+  readonly recordedByPersonId: string;
+  readonly recordedAt: string;
+  readonly reversedAt: string | null;
+  readonly reversedByPersonId: string | null;
+  readonly reversalReason: string | null;
+}
+
+export interface RecordManualPaymentCancellationInput {
+  readonly subjectType: IntakeCheckSubjectType;
+  readonly subjectId: string;
+  readonly clientAccountReference: string;
+  readonly referenceCode?: string | null;
+  readonly notes?: string | null;
+}
+
 export interface PaymentRequestProvider {
   readonly providerId: IntakeCheckProviderMode;
   recordManualPaymentRequest(
@@ -2801,6 +2899,24 @@ export interface PaymentRequestProvider {
     ctx: TenantContext,
     id: string,
   ): Promise<PaymentRequestRecord | null>;
+  recordManualCancellation?(
+    ctx: TenantContext,
+    input: RecordManualPaymentCancellationInput,
+  ): Promise<PaymentRequestRecord>;
+  listPaymentRequestsForSubject?(
+    ctx: TenantContext,
+    subject: {
+      readonly subjectType: IntakeCheckSubjectType;
+      readonly subjectId: string;
+    },
+  ): Promise<readonly PaymentRequestRecord[]>;
+  recordCheckInTx?(
+    tx: unknown,
+    ctx: TenantContext,
+    input: RecordManualPaymentRequestInput & {
+      readonly outcome?: PaymentRequestOutcome;
+    },
+  ): Promise<PaymentRequestRecord>;
 }
 
 export interface TenantIntakeChecksIntegrationConfig {

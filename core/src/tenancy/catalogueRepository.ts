@@ -48,6 +48,9 @@ export type TenantModuleConfigKey =
   | 'document_generation_override'
   | 'document_store_override'
   | 'registers'
+  | 'communication_chasing'
+  | 'engagement_config'
+  | 'money_on_account'
   | (string & {});
 
 export type TenantFirmProfilePayload = Record<string, unknown>;
@@ -985,23 +988,32 @@ export class TenantCatalogueRepository extends TenantScopedRepository {
   // 5. Tenant Module Configs (`tenant_module_configs`)
   // ============================================================================
 
+  public async getModuleConfigInTx<TConfig = unknown>(
+    tx: TenantSqlClient,
+    ctx: TenantContext,
+    configKey: TenantModuleConfigKey,
+  ): Promise<TConfig | null> {
+    if (!configKey?.trim()) return null;
+    const res = await tx.query<TenantModuleConfigRow>(
+      `SELECT tenant_id, config_key, updated_at, updated_by_id, config_json
+         FROM public.tenant_module_configs
+        WHERE tenant_id = $1 AND config_key = $2`,
+      [ctx.tenantId, configKey.trim()],
+    );
+    const row = res.rows[0];
+    if (!row) return null;
+    this.assertRowTenant(ctx, row.tenant_id, 'tenant_module_configs');
+    return structuredClone(row.config_json) as TConfig;
+  }
+
   public async getModuleConfig<TConfig = unknown>(
     ctx: TenantContext,
     configKey: TenantModuleConfigKey,
   ): Promise<TConfig | null> {
     if (!configKey?.trim()) return null;
-    return this.withTenantReadTransaction(ctx, async (tx) => {
-      const res = await tx.query<TenantModuleConfigRow>(
-        `SELECT tenant_id, config_key, updated_at, updated_by_id, config_json
-           FROM public.tenant_module_configs
-          WHERE tenant_id = $1 AND config_key = $2`,
-        [ctx.tenantId, configKey.trim()],
-      );
-      const row = res.rows[0];
-      if (!row) return null;
-      this.assertRowTenant(ctx, row.tenant_id, 'tenant_module_configs');
-      return structuredClone(row.config_json) as TConfig;
-    });
+    return this.withTenantReadTransaction(ctx, async (tx) =>
+      this.getModuleConfigInTx<TConfig>(tx, ctx, configKey),
+    );
   }
 
   public async listAllModuleConfigs(
@@ -1024,6 +1036,41 @@ export class TenantCatalogueRepository extends TenantScopedRepository {
     });
   }
 
+  public async putModuleConfigInTx<TConfig = unknown>(
+    tx: TenantSqlClient,
+    ctx: TenantContext,
+    configKey: TenantModuleConfigKey,
+    config: TConfig,
+    updatedById = 'system',
+  ): Promise<TConfig> {
+    if (!configKey?.trim()) {
+      const err = new Error(
+        'CATALOGUE_CONFIG_VALIDATION_ERROR: configKey is required.',
+      ) as Error & { code: string };
+      err.code = 'CATALOGUE_CONFIG_VALIDATION_ERROR';
+      throw err;
+    }
+    const res = await tx.query<TenantModuleConfigRow>(
+      `INSERT INTO public.tenant_module_configs (
+         tenant_id, config_key, updated_at, updated_by_id, config_json
+       ) VALUES ($1, $2, NOW(), $3, $4::jsonb)
+       ON CONFLICT (tenant_id, config_key) DO UPDATE SET
+         updated_at = NOW(),
+         updated_by_id = EXCLUDED.updated_by_id,
+         config_json = EXCLUDED.config_json
+       RETURNING tenant_id, config_key, updated_at, updated_by_id, config_json`,
+      [
+        ctx.tenantId,
+        configKey.trim(),
+        updatedById,
+        JSON.stringify(config ?? null),
+      ],
+    );
+    const row = res.rows[0]!;
+    this.assertRowTenant(ctx, row.tenant_id, 'tenant_module_configs');
+    return structuredClone(row.config_json) as TConfig;
+  }
+
   public async putModuleConfig<TConfig = unknown>(
     ctx: TenantContext,
     configKey: TenantModuleConfigKey,
@@ -1037,26 +1084,9 @@ export class TenantCatalogueRepository extends TenantScopedRepository {
       err.code = 'CATALOGUE_CONFIG_VALIDATION_ERROR';
       throw err;
     }
-    return this.withTenantTransaction(ctx, async (tx) => {
-      const res = await tx.query<TenantModuleConfigRow>(
-        `INSERT INTO public.tenant_module_configs (
-           tenant_id, config_key, updated_at, updated_by_id, config_json
-         ) VALUES ($1, $2, NOW(), $3, $4::jsonb)
-         ON CONFLICT (tenant_id, config_key) DO UPDATE SET
-           updated_at = NOW(),
-           updated_by_id = EXCLUDED.updated_by_id,
-           config_json = EXCLUDED.config_json
-         RETURNING tenant_id, config_key, updated_at, updated_by_id, config_json`,
-        [
-          ctx.tenantId,
-          configKey.trim(),
-          updatedById,
-          JSON.stringify(config ?? null),
-        ],
-      );
-      const row = res.rows[0]!;
-      this.assertRowTenant(ctx, row.tenant_id, 'tenant_module_configs');      return structuredClone(row.config_json) as TConfig;
-    });
+    return this.withTenantTransaction(ctx, async (tx) =>
+      this.putModuleConfigInTx<TConfig>(tx, ctx, configKey, config, updatedById),
+    );
   }
 
   public async deleteModuleConfig(

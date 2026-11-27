@@ -107,11 +107,31 @@ export class TenantAuditRepository extends TenantScopedRepository {
     return appended[0]!;
   }
 
+  public async appendAuditEntryInTx(
+    tx: TenantSqlClient,
+    ctx: TenantContext,
+    entry: FirmAuditEntryInput,
+  ): Promise<FirmAuditEntryRecord> {
+    const appended = await this.appendAuditEntriesInTx(tx, ctx, [entry]);
+    return appended[0]!;
+  }
+
   public async appendAuditEntries(
     ctx: TenantContext,
     entries: readonly FirmAuditEntryInput[],
   ): Promise<FirmAuditEntryRecord[]> {
     return this.insertAuditEntriesInternal(ctx, entries, false);
+  }
+
+  public async appendAuditEntriesInTx(
+    tx: TenantSqlClient,
+    ctx: TenantContext,
+    entries: readonly FirmAuditEntryInput[],
+  ): Promise<FirmAuditEntryRecord[]> {
+    if (entries.length === 0) {
+      return [];
+    }
+    return this.insertAuditEntriesWithTx(tx, ctx, entries, false);
   }
 
   /**
@@ -134,129 +154,138 @@ export class TenantAuditRepository extends TenantScopedRepository {
       return [];
     }
 
-    return this.withTenantTransaction(ctx, async (tx) => {
-      const persisted: FirmAuditEntryRecord[] = [];
-      let maxExplicitAuNum = 0;
+    return this.withTenantTransaction(ctx, async (tx) =>
+      this.insertAuditEntriesWithTx(tx, ctx, entries, allowConflictSkip),
+    );
+  }
 
-      for (const entry of entries) {
-        if (
-          !entry.recordType?.trim() ||
-          !entry.recordId?.trim() ||
-          !entry.action?.trim() ||
-          !entry.byId?.trim()
-        ) {
-          const valErr = new Error(
-            'TENANCY_AUDIT_WRITE_ERROR: Audit entry requires non-empty recordType, recordId, action, and byId.',
-          ) as Error & { code: string };
-          valErr.code = 'TENANCY_AUDIT_WRITE_ERROR';
-          throw valErr;
-        }
-        const trimmedExplicitId = entry.id?.trim();
-        const id = trimmedExplicitId || (await this.nextAuditIdInTx(tx));
-        if (trimmedExplicitId) {
-          const match = AU_ID_NUMERIC_PATTERN.exec(trimmedExplicitId);
-          if (match?.[1]) {
-            const num = Number.parseInt(match[1], 10);
-            if (Number.isFinite(num) && num > maxExplicitAuNum) {
-              maxExplicitAuNum = num;
-            }
+  private async insertAuditEntriesWithTx(
+    tx: TenantSqlClient,
+    ctx: TenantContext,
+    entries: readonly FirmAuditEntryInput[],
+    allowConflictSkip: boolean,
+  ): Promise<FirmAuditEntryRecord[]> {
+    const persisted: FirmAuditEntryRecord[] = [];
+    let maxExplicitAuNum = 0;
+
+    for (const entry of entries) {
+      if (
+        !entry.recordType?.trim() ||
+        !entry.recordId?.trim() ||
+        !entry.action?.trim() ||
+        !entry.byId?.trim()
+      ) {
+        const valErr = new Error(
+          'TENANCY_AUDIT_WRITE_ERROR: Audit entry requires non-empty recordType, recordId, action, and byId.',
+        ) as Error & { code: string };
+        valErr.code = 'TENANCY_AUDIT_WRITE_ERROR';
+        throw valErr;
+      }
+      const trimmedExplicitId = entry.id?.trim();
+      const id = trimmedExplicitId || (await this.nextAuditIdInTx(tx));
+      if (trimmedExplicitId) {
+        const match = AU_ID_NUMERIC_PATTERN.exec(trimmedExplicitId);
+        if (match?.[1]) {
+          const num = Number.parseInt(match[1], 10);
+          if (Number.isFinite(num) && num > maxExplicitAuNum) {
+            maxExplicitAuNum = num;
           }
         }
-
-        const atIso = entry.at?.trim() || new Date().toISOString();
-        const parsedAtMs = Date.parse(atIso);
-        const safePgTimestampIso = Number.isNaN(parsedAtMs)
-          ? new Date().toISOString()
-          : new Date(parsedAtMs).toISOString();
-
-        const snapshotParam =
-          entry.snapshot !== undefined ? JSON.stringify(entry.snapshot) : null;
-
-        let insertRes: { rows: DbAuditEntryRow[] };
-        try {
-          insertRes = await tx.query<DbAuditEntryRow>(
-            allowConflictSkip
-              ? `INSERT INTO public.audit_entries (
-                   tenant_id, id, record_type, record_id, action, field,
-                   old_value, new_value, reason, by_id, at, at_iso, snapshot_json
-                 ) VALUES (
-                   $1, $2, $3, $4, $5, $6,
-                   $7, $8, $9, $10, $11::timestamptz, $12, $13::jsonb
-                 )
-                 ON CONFLICT (tenant_id, id) DO NOTHING
-                 RETURNING *`
-              : `INSERT INTO public.audit_entries (
-                   tenant_id, id, record_type, record_id, action, field,
-                   old_value, new_value, reason, by_id, at, at_iso, snapshot_json
-                 ) VALUES (
-                   $1, $2, $3, $4, $5, $6,
-                   $7, $8, $9, $10, $11::timestamptz, $12, $13::jsonb
-                 )
-                 RETURNING *`,
-            [
-              ctx.tenantId,
-              id,
-              entry.recordType,
-              entry.recordId,
-              entry.action,
-              entry.field ?? null,
-              entry.oldValue ?? null,
-              entry.newValue ?? null,
-              entry.reason ?? null,
-              entry.byId,
-              safePgTimestampIso,
-              atIso,
-              snapshotParam,
-            ],
-          );
-        } catch (pgErr) {
-          const sqlState = (pgErr as { code?: unknown })?.code;
-          if (sqlState === '23505') {
-            const dupErr = new Error(
-              'TENANCY_AUDIT_WRITE_ERROR: Duplicate or invalid firm audit entry could not be recorded.',
-            ) as Error & { code: string };
-            dupErr.code = 'TENANCY_AUDIT_WRITE_ERROR';
-            throw dupErr;
-          }
-          throw pgErr;
-        }
-
-        let row = insertRes.rows[0];
-        if (!row && allowConflictSkip) {
-          const existingRes = await tx.query<DbAuditEntryRow>(
-            'SELECT * FROM public.audit_entries WHERE tenant_id = $1 AND id = $2',
-            [ctx.tenantId, id],
-          );
-          row = existingRes.rows[0];
-        }
-        if (!row) {
-          const writeErr = new Error(
-            'TENANCY_AUDIT_WRITE_ERROR: Audit entry could not be persisted or verified.',
-          ) as Error & { code: string };
-          writeErr.code = 'TENANCY_AUDIT_WRITE_ERROR';
-          throw writeErr;
-        }
-        this.assertRowTenant(ctx, row.tenant_id, 'FirmAuditEntry');
-        persisted.push(mapAuditRow(row));
       }
 
-      if (maxExplicitAuNum > 0) {
-        await tx.query(
-          `SELECT setval(
-             'public.tenant_audit_id_seq',
-             GREATEST(
-               CASE WHEN is_called THEN last_value ELSE 0 END,
-               $1::bigint
-             ),
-             true
-           )
-           FROM public.tenant_audit_id_seq`,
-          [maxExplicitAuNum],
+      const atIso = entry.at?.trim() || new Date().toISOString();
+      const parsedAtMs = Date.parse(atIso);
+      const safePgTimestampIso = Number.isNaN(parsedAtMs)
+        ? new Date().toISOString()
+        : new Date(parsedAtMs).toISOString();
+
+      const snapshotParam =
+        entry.snapshot !== undefined ? JSON.stringify(entry.snapshot) : null;
+
+      let insertRes: { rows: DbAuditEntryRow[] };
+      try {
+        insertRes = await tx.query<DbAuditEntryRow>(
+          allowConflictSkip
+            ? `INSERT INTO public.audit_entries (
+                 tenant_id, id, record_type, record_id, action, field,
+                 old_value, new_value, reason, by_id, at, at_iso, snapshot_json
+               ) VALUES (
+                 $1, $2, $3, $4, $5, $6,
+                 $7, $8, $9, $10, $11::timestamptz, $12, $13::jsonb
+               )
+               ON CONFLICT (tenant_id, id) DO NOTHING
+               RETURNING *`
+            : `INSERT INTO public.audit_entries (
+                 tenant_id, id, record_type, record_id, action, field,
+                 old_value, new_value, reason, by_id, at, at_iso, snapshot_json
+               ) VALUES (
+                 $1, $2, $3, $4, $5, $6,
+                 $7, $8, $9, $10, $11::timestamptz, $12, $13::jsonb
+               )
+               RETURNING *`,
+          [
+            ctx.tenantId,
+            id,
+            entry.recordType,
+            entry.recordId,
+            entry.action,
+            entry.field ?? null,
+            entry.oldValue ?? null,
+            entry.newValue ?? null,
+            entry.reason ?? null,
+            entry.byId,
+            safePgTimestampIso,
+            atIso,
+            snapshotParam,
+          ],
         );
+      } catch (pgErr) {
+        const sqlState = (pgErr as { code?: unknown })?.code;
+        if (sqlState === '23505') {
+          const dupErr = new Error(
+            'TENANCY_AUDIT_WRITE_ERROR: Duplicate or invalid firm audit entry could not be recorded.',
+          ) as Error & { code: string };
+          dupErr.code = 'TENANCY_AUDIT_WRITE_ERROR';
+          throw dupErr;
+        }
+        throw pgErr;
       }
 
-      return persisted;
-    });
+      let row = insertRes.rows[0];
+      if (!row && allowConflictSkip) {
+        const existingRes = await tx.query<DbAuditEntryRow>(
+          'SELECT * FROM public.audit_entries WHERE tenant_id = $1 AND id = $2',
+          [ctx.tenantId, id],
+        );
+        row = existingRes.rows[0];
+      }
+      if (!row) {
+        const writeErr = new Error(
+          'TENANCY_AUDIT_WRITE_ERROR: Audit entry could not be persisted or verified.',
+        ) as Error & { code: string };
+        writeErr.code = 'TENANCY_AUDIT_WRITE_ERROR';
+        throw writeErr;
+      }
+      this.assertRowTenant(ctx, row.tenant_id, 'FirmAuditEntry');
+      persisted.push(mapAuditRow(row));
+    }
+
+    if (maxExplicitAuNum > 0) {
+      await tx.query(
+        `SELECT setval(
+           'public.tenant_audit_id_seq',
+           GREATEST(
+             CASE WHEN is_called THEN last_value ELSE 0 END,
+             $1::bigint
+           ),
+           true
+         )
+         FROM public.tenant_audit_id_seq`,
+        [maxExplicitAuNum],
+      );
+    }
+
+    return persisted;
   }
 
   public async listAuditEntriesForRecord(

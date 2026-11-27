@@ -2,6 +2,16 @@
 
 All notable changes to `@platform/core` and `@platform/core-api` are documented in this file.
 
+## 2026-11-27 — Extension API v2.6.0 (`S1-08` Money on Account Configuration, RBAC & Payment Request Contracts, ADR 0043)
+
+### Added (Backward Compatible within `^2.0.0`)
+- **`CORE_API_VERSION` bumped from `'2.5.0'` to `'2.6.0'` (`@platform/core-api`, `core/src/api/index.ts`, [ADR 0043](../../docs/decisions/0043-money-on-account-requests-and-receipts.md)):**
+  - Added `'money_on_account:view'`, `'money_on_account:request'`, and `'money_on_account:record_receipt'` to `PermissionKey` and `PERMISSION_REGISTRY` (`85` total / `74` user / `11` job-only; `money_on_account:record_receipt` granted strictly to `finance`, `partner`, and `managing_partner` only).
+  - Added `'money_on_account_request'`, `'money_on_account_receipt'`, and `'money_on_account_config'` to `FirmAuditRecordType`.
+  - Added `BankAccountDetailsConfig`, `MoneyOnAccountRequestWordingsConfig`, `MoneyOnAccountConfiguration`, `MoneyOnAccountRequestStatus`, `MoneyOnAccountReceiptSource`, `MoneyOnAccountRequestRecord`, `MoneyOnAccountReceiptRecord`, and `RecordManualPaymentCancellationInput`.
+  - Added optional `moneyOnAccount?: MoneyOnAccountConfiguration` to `TenantConfiguration` (safe core defaults: `enabled: false`, empty bank details, `paymentReferencePrefix: 'MOA'`; live placeholder refusal).
+  - Extended `PaymentRequestProvider` additively with optional `recordManualCancellation?`, `listPaymentRequestsForSubject?`, and `recordCheckInTx?`, implemented on `ManualPaymentRequestProvider`.
+
 ## 2026-11-27 — Extension API v2.5.0 (`S1-07` Quote Price Transparency Configuration)
 
 ### Added (Backward Compatible within `^2.0.0`)

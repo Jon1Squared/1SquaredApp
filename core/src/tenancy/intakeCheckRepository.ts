@@ -209,7 +209,7 @@ export class TenantIntakeCheckRepository extends TenantScopedRepository {
       at: recordedAt,
       reason: `Intake check recorded (kind=${input.checkKind}, provider=${input.provider}, subjectType=${input.subjectType}, evidenceCount=${input.evidenceRefs.length}, correlationId=${ctx.correlationId}).`,
     };
-    await this.auditRepo.appendAuditEntries(ctx, [auditEntry]);
+    await this.auditRepo.appendAuditEntriesInTx(tx, ctx, [auditEntry]);
 
     return mapIntakeCheckRow(inserted);
   }

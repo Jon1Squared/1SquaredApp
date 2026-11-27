@@ -29,6 +29,7 @@ import {
   type HostingMode,
   type KeyDatesConfiguration,
   type MatterFolderTemplateNode,
+  type MoneyOnAccountConfiguration,
   type PermissionKey,
   type PlatformEnvironment,
   type RbacConfiguration,
@@ -1201,6 +1202,62 @@ const EngagementConfigSchema = z
     nonEngagementWording: NonEngagementWordingMapSchema.default(
       createDefaultNonEngagementWordingMapValue,
     ),
+  })
+  .strict();
+
+const BankAccountDetailsSchema = z
+  .object({
+    accountName: z.string().max(200).default(''),
+    bankName: z.string().max(200).default(''),
+    sortCode: z.string().max(16).default(''),
+    accountNumber: z.string().max(32).default(''),
+    iban: z.string().max(42).default(''),
+    bic: z.string().max(20).default(''),
+    allowDemoPlaceholderDetails: z.boolean().default(false),
+  })
+  .strict();
+
+const createDefaultBankAccountDetailsValue = () => ({
+  accountName: '',
+  bankName: '',
+  sortCode: '',
+  accountNumber: '',
+  iban: '',
+  bic: '',
+  allowDemoPlaceholderDetails: false,
+});
+
+const MoneyOnAccountRequestWordingsSchema = z
+  .object({
+    introductoryParagraph: z.string().max(4000).default(''),
+    bankTransferInstruction: z.string().max(4000).default(''),
+    clientMoneyComplianceNote: z.string().max(4000).default(''),
+  })
+  .strict();
+
+const createDefaultMoneyOnAccountWordingsValue = () => ({
+  introductoryParagraph: '',
+  bankTransferInstruction: '',
+  clientMoneyComplianceNote: '',
+});
+
+const MoneyOnAccountConfigSchema = z
+  .object({
+    enabled: z.boolean().default(false),
+    clientAccount: BankAccountDetailsSchema.default(
+      createDefaultBankAccountDetailsValue,
+    ),
+    requestEmailSubjectTemplate: z.string().max(500).default(''),
+    requestWordings: MoneyOnAccountRequestWordingsSchema.default(
+      createDefaultMoneyOnAccountWordingsValue,
+    ),
+    paymentReferencePrefix: z
+      .string()
+      .regex(
+        /^[A-Z0-9]{2,6}$/,
+        'moneyOnAccount.paymentReferencePrefix must be 2 to 6 uppercase ASCII letters or digits.',
+      )
+      .default('MOA'),
   })
   .strict();
 
@@ -3125,6 +3182,9 @@ export const TenantConfigurationSchema = z
     engagement: EngagementConfigSchema.optional().describe(
       'Configurable Client Care terms summary and Non-Engagement letter wording keyed by close reason (S1-06).',
     ),
+    moneyOnAccount: MoneyOnAccountConfigSchema.optional().describe(
+      'Client money on account bank details, request wording, and UK payment reference prefix (ADR 0043, S1-08).',
+    ),
   })
   .strict()
   .superRefine((cfg, ctx) => {
@@ -4763,6 +4823,73 @@ export function loadAndValidateTenantConfig(
     }
   }
 
+  const baseMoa =
+    baseConfig.moneyOnAccount &&
+    typeof baseConfig.moneyOnAccount === 'object' &&
+    !Array.isArray(baseConfig.moneyOnAccount)
+      ? (baseConfig.moneyOnAccount as Record<string, unknown>)
+      : undefined;
+  const overlayMoa =
+    environmentOverlay.moneyOnAccount &&
+    typeof environmentOverlay.moneyOnAccount === 'object' &&
+    !Array.isArray(environmentOverlay.moneyOnAccount)
+      ? (environmentOverlay.moneyOnAccount as Record<string, unknown>)
+      : undefined;
+  if (
+    baseMoa ||
+    overlayMoa ||
+    environmentOverlay.moneyOnAccount !== undefined
+  ) {
+    if (environmentOverlay.moneyOnAccount !== undefined && !overlayMoa) {
+      merged.moneyOnAccount = environmentOverlay.moneyOnAccount;
+    } else {
+      const baseAcct =
+        baseMoa?.clientAccount &&
+        typeof baseMoa.clientAccount === 'object' &&
+        !Array.isArray(baseMoa.clientAccount)
+          ? (baseMoa.clientAccount as Record<string, unknown>)
+          : undefined;
+      const overlayAcct =
+        overlayMoa?.clientAccount &&
+        typeof overlayMoa.clientAccount === 'object' &&
+        !Array.isArray(overlayMoa.clientAccount)
+          ? (overlayMoa.clientAccount as Record<string, unknown>)
+          : undefined;
+      const mergedAcct =
+        overlayMoa?.clientAccount !== undefined && !overlayAcct
+          ? overlayMoa.clientAccount
+          : baseAcct || overlayAcct
+            ? { ...(baseAcct ?? {}), ...(overlayAcct ?? {}) }
+            : undefined;
+
+      const baseWordings =
+        baseMoa?.requestWordings &&
+        typeof baseMoa.requestWordings === 'object' &&
+        !Array.isArray(baseMoa.requestWordings)
+          ? (baseMoa.requestWordings as Record<string, unknown>)
+          : undefined;
+      const overlayWordings =
+        overlayMoa?.requestWordings &&
+        typeof overlayMoa.requestWordings === 'object' &&
+        !Array.isArray(overlayMoa.requestWordings)
+          ? (overlayMoa.requestWordings as Record<string, unknown>)
+          : undefined;
+      const mergedWordings =
+        overlayMoa?.requestWordings !== undefined && !overlayWordings
+          ? overlayMoa.requestWordings
+          : baseWordings || overlayWordings
+            ? { ...(baseWordings ?? {}), ...(overlayWordings ?? {}) }
+            : undefined;
+
+      merged.moneyOnAccount = {
+        ...(baseMoa ?? {}),
+        ...(overlayMoa ?? {}),
+        ...(mergedAcct !== undefined ? { clientAccount: mergedAcct } : {}),
+        ...(mergedWordings !== undefined ? { requestWordings: mergedWordings } : {}),
+      };
+    }
+  }
+
   return TenantConfigurationSchema.parse(merged);
 }
 
@@ -4773,6 +4900,7 @@ export const MatterNumberingConfigSubSchema =
   TenantConfigurationSchema.shape.matterNumbering;
 export const ChasingConfigSubSchema = TenantConfigurationSchema.shape.chasing;
 export const EngagementConfigSubSchema = TenantConfigurationSchema.shape.engagement;
+export const MoneyOnAccountConfigSubSchema = TenantConfigurationSchema.shape.moneyOnAccount;
 export const RbacConfigSubSchema = TenantConfigurationSchema.shape.rbac;
 export const ConflictReviewConfigSubSchema =
   TenantConfigurationSchema.shape.conflictReview;
@@ -4821,6 +4949,29 @@ export function validateEngagementConfig(
   } catch (err) {
     throw new Error(
       `ENGAGEMENT_CONFIG_INVALID: ${err instanceof Error ? err.message : String(err)}`,
+    );
+  }
+}
+
+export function validateMoneyOnAccountConfig(
+  rawMoneyOnAccountConfig: unknown,
+): MoneyOnAccountConfiguration {
+  if (
+    typeof rawMoneyOnAccountConfig !== 'object' ||
+    rawMoneyOnAccountConfig === null ||
+    Array.isArray(rawMoneyOnAccountConfig)
+  ) {
+    throw new Error(
+      'MOA_CONFIG_INVALID: moneyOnAccount configuration must be a JSON object.',
+    );
+  }
+  try {
+    return MoneyOnAccountConfigSubSchema.unwrap().parse(
+      rawMoneyOnAccountConfig,
+    ) as MoneyOnAccountConfiguration;
+  } catch (err) {
+    throw new Error(
+      `MOA_CONFIG_INVALID: ${err instanceof Error ? err.message : String(err)}`,
     );
   }
 }

@@ -325,9 +325,9 @@ describe('Central Configuration-Driven RBAC (ADR-0010 .. ADR-0016)', () => {
   });
 
   describe('1. Permission Registry & Field Catalogue Contract (ADR-0010)', () => {
-    it('defines all 71 canonical user permissions plus 11 job-only permissions with metadata and MFA flags', () => {
-      expect(ALL_PERMISSION_KEYS.length).toBe(82);
-      expect(ALL_USER_PERMISSION_KEYS.length).toBe(71);
+    it('defines all 74 canonical user permissions plus 11 job-only permissions with metadata and MFA flags', () => {
+      expect(ALL_PERMISSION_KEYS.length).toBe(85);
+      expect(ALL_USER_PERMISSION_KEYS.length).toBe(74);
       expect(ALL_JOB_ONLY_PERMISSION_KEYS).toEqual([
         'tenant:provision',
         'tenant:migrate',
@@ -416,13 +416,16 @@ describe('Central Configuration-Driven RBAC (ADR-0010 .. ADR-0016)', () => {
         }),
       ).toThrow(/RBAC_TENANT_REQUIRED/);
 
-      // Admin holds all user permissions except undertaking:manage (ADR 0032), cdd:view, cdd:record (R748), and matter:opening_gate:override (ADR 0040) and zero job-only permissions
+      // Admin holds all user permissions except undertaking:manage (ADR 0032), cdd:view, cdd:record (R748), matter:opening_gate:override (ADR 0040), and money_on_account:record_receipt (ADR 0043) and zero job-only permissions
       const adminPerms = resolveForRole('admin');
-      expect(adminPerms.permissionList.length).toBe(ALL_USER_PERMISSION_KEYS.length - 4);
+      expect(adminPerms.permissionList.length).toBe(ALL_USER_PERMISSION_KEYS.length - 5);
       expect(adminPerms.has('undertaking:manage')).toBe(false);
       expect(adminPerms.has('cdd:view')).toBe(false);
       expect(adminPerms.has('cdd:record')).toBe(false);
       expect(adminPerms.has('matter:opening_gate:override')).toBe(false);
+      expect(adminPerms.has('money_on_account:record_receipt')).toBe(false);
+      expect(adminPerms.has('money_on_account:view')).toBe(true);
+      expect(adminPerms.has('money_on_account:request')).toBe(true);
       expect(adminPerms.has('register:configure')).toBe(true);
       for (const jobPerm of ALL_JOB_ONLY_PERMISSION_KEYS) {
         expect(adminPerms.has(jobPerm)).toBe(false);
@@ -478,6 +481,21 @@ describe('Central Configuration-Driven RBAC (ADR-0010 .. ADR-0016)', () => {
       expect(ecPerms.has('document:generate')).toBe(true);
       expect(ecPerms.has('document:delete')).toBe(false);
       expect(ecPerms.has('finance:view_matter')).toBe(false);
+
+      // S1-08: money_on_account:record_receipt granted strictly to finance, partner, managing_partner only
+      expect(mpPerms.has('money_on_account:record_receipt')).toBe(true);
+      expect(partnerPerms.has('money_on_account:record_receipt')).toBe(true);
+      expect(finPerms.has('money_on_account:record_receipt')).toBe(true);
+      expect(fePerms.has('money_on_account:view')).toBe(true);
+      expect(fePerms.has('money_on_account:request')).toBe(true);
+      expect(fePerms.has('money_on_account:record_receipt')).toBe(false);
+      expect(resolveForRole('supervisor').has('money_on_account:record_receipt')).toBe(false);
+      expect(resolveForRole('legal_secretary').has('money_on_account:record_receipt')).toBe(false);
+      expect(riskPerms.has('money_on_account:view')).toBe(true);
+      expect(riskPerms.has('money_on_account:request')).toBe(false);
+      expect(riskPerms.has('money_on_account:record_receipt')).toBe(false);
+      expect(ecPerms.has('money_on_account:view')).toBe(false);
+      expect(resolveForRole('intake').has('money_on_account:view')).toBe(false);
     });
 
     it('applies tenant-configured departmentGrants (DEPT-HR, DEPT-FIN, DEPT-RISK) and relationshipGrants', () => {

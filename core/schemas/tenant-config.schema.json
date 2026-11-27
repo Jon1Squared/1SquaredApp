@@ -2641,6 +2641,136 @@
           }
         }
       }
+    },
+    "moneyOnAccount": {
+      "type": "object",
+      "additionalProperties": false,
+      "description": "Client money on account bank account details, request email subject/wording, and payment reference prefix (ADR 0043, S1-08). Safe core defaults disable requests and leave bank details empty.",
+      "default": {
+        "enabled": false,
+        "clientAccount": {
+          "accountName": "",
+          "bankName": "",
+          "sortCode": "",
+          "accountNumber": "",
+          "iban": "",
+          "bic": "",
+          "allowDemoPlaceholderDetails": false
+        },
+        "requestEmailSubjectTemplate": "",
+        "requestWordings": {
+          "introductoryParagraph": "",
+          "bankTransferInstruction": "",
+          "clientMoneyComplianceNote": ""
+        },
+        "paymentReferencePrefix": "MOA"
+      },
+      "properties": {
+        "enabled": {
+          "type": "boolean",
+          "default": false,
+          "description": "Enables issuing and tracking client money on account payment requests."
+        },
+        "clientAccount": {
+          "type": "object",
+          "additionalProperties": false,
+          "description": "Firm client account bank details printed on requests and transfer statements.",
+          "default": {
+            "accountName": "",
+            "bankName": "",
+            "sortCode": "",
+            "accountNumber": "",
+            "iban": "",
+            "bic": "",
+            "allowDemoPlaceholderDetails": false
+          },
+          "properties": {
+            "accountName": {
+              "type": "string",
+              "maxLength": 200,
+              "default": "",
+              "description": "Client account holder name shown on transfer instructions."
+            },
+            "bankName": {
+              "type": "string",
+              "maxLength": 200,
+              "default": "",
+              "description": "Client account clearing bank name."
+            },
+            "sortCode": {
+              "type": "string",
+              "maxLength": 16,
+              "default": "",
+              "description": "UK clearing bank sort code (empty until configured)."
+            },
+            "accountNumber": {
+              "type": "string",
+              "maxLength": 32,
+              "default": "",
+              "description": "Client bank account number (empty until configured)."
+            },
+            "iban": {
+              "type": "string",
+              "maxLength": 42,
+              "default": "",
+              "description": "Optional International Bank Account Number (IBAN)."
+            },
+            "bic": {
+              "type": "string",
+              "maxLength": 20,
+              "default": "",
+              "description": "Optional Bank Identifier Code (BIC / SWIFT)."
+            },
+            "allowDemoPlaceholderDetails": {
+              "type": "boolean",
+              "default": false,
+              "description": "Marks non-real demo placeholder bank details (automatically rejected in live environments)."
+            }
+          }
+        },
+        "requestEmailSubjectTemplate": {
+          "type": "string",
+          "maxLength": 500,
+          "default": "",
+          "description": "Subject template rendered for Money on Account payment request emails."
+        },
+        "requestWordings": {
+          "type": "object",
+          "additionalProperties": false,
+          "description": "Configurable paragraphs rendered on Money on Account payment requests and statements.",
+          "default": {
+            "introductoryParagraph": "",
+            "bankTransferInstruction": "",
+            "clientMoneyComplianceNote": ""
+          },
+          "properties": {
+            "introductoryParagraph": {
+              "type": "string",
+              "maxLength": 4000,
+              "default": "",
+              "description": "Introductory explanation of the payment on account request."
+            },
+            "bankTransferInstruction": {
+              "type": "string",
+              "maxLength": 4000,
+              "default": "",
+              "description": "Client transfer instruction reminding the sender to quote the exact payment reference."
+            },
+            "clientMoneyComplianceNote": {
+              "type": "string",
+              "maxLength": 4000,
+              "default": "",
+              "description": "Regulatory client money, source-of-funds, and anti-fraud verification notice."
+            }
+          }
+        },
+        "paymentReferencePrefix": {
+          "type": "string",
+          "pattern": "^[A-Z0-9]{2,6}$",
+          "default": "MOA",
+          "description": "2-to-6 character uppercase ASCII prefix used on Faster Payments references (MOA-<MATTER>-<NN>)."
+        }
+      }
     }
   }
 }

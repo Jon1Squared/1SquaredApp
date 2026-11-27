@@ -2415,5 +2415,24 @@
         ]
       }
     }
+  },
+  "moneyOnAccount": {
+    "enabled": true,
+    "clientAccount": {
+      "accountName": "Not A Law Firm LLP — Client Account (DEMO ONLY)",
+      "bankName": "Example Clearing Bank plc (Fictional Demo Bank)",
+      "sortCode": "00-00-00",
+      "accountNumber": "00000000",
+      "iban": "GB00DEMO00000000000000",
+      "bic": "DEMOGB00XXX",
+      "allowDemoPlaceholderDetails": true
+    },
+    "requestEmailSubjectTemplate": "Payment on account request ({{paymentReference}}) — {{matterTitle}}",
+    "requestWordings": {
+      "introductoryParagraph": "Thank you for instructing Not A Law Firm LLP. To enable us to commence work and cover initial anticipated fees or third-party disbursements on your matter, we require a payment on account of {{requestedAmountFormatted}} to be held in our client account.",
+      "bankTransferInstruction": "Please transfer {{requestedAmountFormatted}} by Faster Payments or CHAPS to our client account below. You must quote the exact payment reference {{paymentReference}} on your transfer so that our Finance team can allocate your funds promptly to your matter and avoid any delay in opening your file.",
+      "clientMoneyComplianceNote": "Important: Funds must come from a bank account in your own name (or the named client organisation's account) and match our source-of-funds checks where applicable. We do not accept cash payments or unsolicited third-party transfers without prior written verification. For your security, we will never notify you of a change to our client account details by email alone — please telephone your fee earner using our verified published number before sending large transfers if you ever wish to double-check our bank details. (Demonstration environment only: do not send real money to the demo account details shown above.)"
+    },
+    "paymentReferencePrefix": "MOA"
   }
 }

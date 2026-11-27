@@ -11,13 +11,17 @@
 
 import {
   getEngagementStatusRank,
+  type BankAccountDetailsConfig,
   type ChasingConfiguration,
   type ChasingRuleConfig,
   type CommunicationChaseEntityKind,
   type EngagementConfiguration,
+  type MoneyOnAccountConfiguration,
+  type MoneyOnAccountRequestWordingsConfig,
   type NonEngagementReasonKey,
   type NonEngagementReasonWordingConfig,
   type NonEngagementWordingMap,
+  type PlatformEnvironment,
   type TenantConfiguration,
 } from '../../api/index';
 export { getEngagementStatusRank };
@@ -54,6 +58,132 @@ export const DEFAULT_ENGAGEMENT_CONFIGURATION: Readonly<EngagementConfiguration>
     defaultFallback: DEFAULT_EMPTY_NON_ENGAGEMENT_REASON_WORDING,
   }),
 });
+
+export const DEFAULT_BANK_ACCOUNT_DETAILS_CONFIG: Readonly<BankAccountDetailsConfig> = Object.freeze({
+  accountName: '',
+  bankName: '',
+  sortCode: '',
+  accountNumber: '',
+  iban: '',
+  bic: '',
+  allowDemoPlaceholderDetails: false,
+});
+
+export const DEFAULT_MONEY_ON_ACCOUNT_WORDINGS: Readonly<MoneyOnAccountRequestWordingsConfig> =
+  Object.freeze({
+    introductoryParagraph: '',
+    bankTransferInstruction: '',
+    clientMoneyComplianceNote: '',
+  });
+
+export const DEFAULT_MONEY_ON_ACCOUNT_CONFIGURATION: Readonly<MoneyOnAccountConfiguration> =
+  Object.freeze({
+    enabled: false,
+    clientAccount: DEFAULT_BANK_ACCOUNT_DETAILS_CONFIG,
+    requestEmailSubjectTemplate: '',
+    requestWordings: DEFAULT_MONEY_ON_ACCOUNT_WORDINGS,
+    paymentReferencePrefix: 'MOA',
+  });
+
+export function isPlaceholderClientBankDetails(
+  clientAccount: Partial<BankAccountDetailsConfig> | null | undefined,
+): boolean {
+  if (!clientAccount) return false;
+  const sortDigits = (clientAccount.sortCode ?? '').replace(/[^0-9]/g, '');
+  const accountDigits = (clientAccount.accountNumber ?? '').replace(/[^0-9]/g, '');
+  const ibanUpper = (clientAccount.iban ?? '').replace(/\s+/g, '').toUpperCase();
+  const accountNameUpper = (clientAccount.accountName ?? '').toUpperCase();
+  const bankNameUpper = (clientAccount.bankName ?? '').toUpperCase();
+  return (
+    Boolean(clientAccount.allowDemoPlaceholderDetails) ||
+    sortDigits === '000000' ||
+    accountDigits === '00000000' ||
+    ibanUpper.startsWith('GB00DEMO') ||
+    accountNameUpper.includes('DEMO ONLY') ||
+    bankNameUpper.includes('FICTIONAL DEMO')
+  );
+}
+
+export function assertMoneyOnAccountSafeForEnvironment(
+  config: MoneyOnAccountConfiguration,
+  environment: PlatformEnvironment,
+): void {
+  if (environment === 'live' && isPlaceholderClientBankDetails(config.clientAccount)) {
+    throw new Error(
+      'MOA_LIVE_PLACEHOLDER_BANK_DETAILS_FORBIDDEN: Demo placeholder client account bank details cannot be used in a live environment.',
+    );
+  }
+}
+
+export function resolveMoneyOnAccountConfiguration(
+  config?: Pick<TenantConfiguration, 'moneyOnAccount'> | null,
+  override?: Partial<MoneyOnAccountConfiguration> | null,
+): MoneyOnAccountConfiguration {
+  const moneyOnAccount = config?.moneyOnAccount;
+  const clientAccountOverride = override?.clientAccount;
+  const clientAccountSource = moneyOnAccount?.clientAccount;
+  const wordingsOverride = override?.requestWordings;
+  const wordingsSource = moneyOnAccount?.requestWordings;
+
+  const clientAccount: BankAccountDetailsConfig = {
+    accountName:
+      clientAccountOverride?.accountName ?? clientAccountSource?.accountName ?? '',
+    bankName:
+      clientAccountOverride?.bankName ?? clientAccountSource?.bankName ?? '',
+    sortCode:
+      clientAccountOverride?.sortCode ?? clientAccountSource?.sortCode ?? '',
+    accountNumber:
+      clientAccountOverride?.accountNumber ?? clientAccountSource?.accountNumber ?? '',
+    iban: clientAccountOverride?.iban ?? clientAccountSource?.iban ?? '',
+    bic: clientAccountOverride?.bic ?? clientAccountSource?.bic ?? '',
+    allowDemoPlaceholderDetails:
+      typeof clientAccountOverride?.allowDemoPlaceholderDetails === 'boolean'
+        ? clientAccountOverride.allowDemoPlaceholderDetails
+        : typeof clientAccountSource?.allowDemoPlaceholderDetails === 'boolean'
+          ? clientAccountSource.allowDemoPlaceholderDetails
+          : false,
+  };
+
+  const requestWordings: MoneyOnAccountRequestWordingsConfig = {
+    introductoryParagraph:
+      wordingsOverride?.introductoryParagraph ??
+      wordingsSource?.introductoryParagraph ??
+      '',
+    bankTransferInstruction:
+      wordingsOverride?.bankTransferInstruction ??
+      wordingsSource?.bankTransferInstruction ??
+      '',
+    clientMoneyComplianceNote:
+      wordingsOverride?.clientMoneyComplianceNote ??
+      wordingsSource?.clientMoneyComplianceNote ??
+      '',
+  };
+
+  const rawPrefix =
+    override?.paymentReferencePrefix ??
+    moneyOnAccount?.paymentReferencePrefix ??
+    'MOA';
+  const cleanedPrefix = rawPrefix.trim().toUpperCase().replace(/[^A-Z0-9]/g, '');
+
+  return {
+    enabled:
+      typeof override?.enabled === 'boolean'
+        ? override.enabled
+        : typeof moneyOnAccount?.enabled === 'boolean'
+          ? moneyOnAccount.enabled
+          : false,
+    clientAccount,
+    requestEmailSubjectTemplate:
+      override?.requestEmailSubjectTemplate ??
+      moneyOnAccount?.requestEmailSubjectTemplate ??
+      '',
+    requestWordings,
+    paymentReferencePrefix:
+      cleanedPrefix.length >= 2 && cleanedPrefix.length <= 6
+        ? cleanedPrefix
+        : 'MOA',
+  };
+}
 
 export function isEngagementStatusRegression(
   previousStatus: string | null | undefined,

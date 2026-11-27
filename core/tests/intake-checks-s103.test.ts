@@ -362,6 +362,20 @@ describe('S1-03: Intake check interfaces, manual adapters, evidence storage & ou
     });
     expect(payReceipt.amountMinorUnits).toBe(BigInt(125000));
 
+    const payCancel = await providers.payments.recordManualCancellation?.(ctxAlpha, {
+      subjectType: 'matter',
+      subjectId: 'M-000001',
+      clientAccountReference: 'MAT-001-POA',
+      notes: 'Cancelled test payment request',
+    });
+    expect(payCancel?.outcome).toBe('cancelled');
+    const payList = await providers.payments.listPaymentRequestsForSubject?.(ctxAlpha, {
+      subjectType: 'matter',
+      subjectId: 'M-000001',
+    });
+    expect(payList?.some((r) => r.id === payReq.id)).toBe(true);
+    expect(payList?.some((r) => r.outcome === 'cancelled')).toBe(true);
+
     // Reject negative bigint minor units
     await expect(
       providers.payments.recordManualPaymentRequest(ctxAlpha, {
