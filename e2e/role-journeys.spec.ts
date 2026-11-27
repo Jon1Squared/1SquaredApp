@@ -2054,9 +2054,9 @@ test.describe.serial('S1-08: Joined Stage 1 journey — Enquiry -> Quote -> CDD 
       await fePage.getByTestId('quote-poa-amount-input').fill('500');
       await fePage.getByRole('button', { name: 'Save as draft' }).click();
 
-      await expect(fePage).toHaveURL(/\/quotes\/(Q-\d{4}-\d+)$/, { timeout: 20_000 });
-      quoteId = fePage.url().match(/\/quotes\/(Q-\d{4}-\d+)$/)?.[1] ?? '';
-      expect(quoteId).toMatch(/^Q-\d{4}-\d+$/);
+      await expect(fePage).toHaveURL(/\/quotes\/(QTE-\d{4}-\d+)$/, { timeout: 20_000 });
+      quoteId = fePage.url().match(/\/quotes\/(QTE-\d{4}-\d+)$/)?.[1] ?? '';
+      expect(quoteId).toMatch(/^QTE-\d{4}-\d+$/);
 
       await fePage.getByTestId('quote-send-email-open-btn').click();
       await fePage.getByTestId('quote-send-email-submit-btn').click();
@@ -2067,9 +2067,9 @@ test.describe.serial('S1-08: Joined Stage 1 journey — Enquiry -> Quote -> CDD 
       await fePage.getByRole('button', { name: 'Record outcome' }).click();
       await fePage.getByRole('button', { name: 'Save outcome' }).click();
       await expect(
-        fePage.getByRole('button', { name: 'Convert to matter' }),
+        fePage.getByRole('button', { name: 'Convert to matter' }).first(),
       ).toBeVisible({ timeout: 15_000 });
-      await fePage.getByRole('button', { name: 'Convert to matter' }).click();
+      await fePage.getByRole('button', { name: 'Convert to matter' }).first().click();
 
       await expect(fePage).toHaveURL(/\/matters\/new\?/, { timeout: 20_000 });
       const clientIdMatch = fePage.url().match(/[?&]clientId=([^&]+)/);
