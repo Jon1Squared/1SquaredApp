@@ -8,7 +8,7 @@
  * page loaders, and client UI evaluate opening readiness identically.
  */
 
-import type { RegisterRecord } from '@platform/core-api';
+import { getEngagementStatusRank, type RegisterRecord } from '@platform/core-api';
 import type { CddWorkflowStatus } from './cdd';
 import { hasUnapprovedRestrictedMatches } from './matterConflicts';
 import type { WorkTypeOpeningGateFields } from './workTypeConfig';
@@ -36,17 +36,7 @@ export type EngagementSignedStatus = (typeof ENGAGEMENT_SIGNED_STATUSES)[number]
 export function getEngagementLetterStatusRank(
   status: string | null | undefined,
 ): 0 | 1 | 2 | 3 {
-  const normalized = (status ?? '').trim().toLowerCase();
-  if (normalized === 'signed' || normalized === 'signed & returned') {
-    return 3;
-  }
-  if (normalized === 'sent' || normalized === 'sent to client') {
-    return 2;
-  }
-  if (normalized === 'drafted') {
-    return 1;
-  }
-  return 0;
+  return getEngagementStatusRank(status);
 }
 
 export function isEngagementLetterSignedStatus(

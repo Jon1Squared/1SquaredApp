@@ -3,6 +3,7 @@ import notALawFirmBaseConfig from '../../client-not-a-law-firm/config/base.json'
 import {
   CORE_API_VERSION,
   getEngagementStatusRank,
+  isCoreApiRangeCompatible,
   isEngagementStatusRegression,
   loadAndValidateTenantConfig,
   NON_ENGAGEMENT_DOCUMENT_TYPE,
@@ -10,14 +11,15 @@ import {
   resolveChasingConfiguration,
   resolveChasingScheduleForKind,
   resolveEngagementConfiguration,
+  sanitizePostgresError,
   validateChasingConfig,
   validateChasingRuleSchedule,
   validateEngagementConfig,
 } from '../src/index';
 
 describe('S1-06: Communication Chasing & Engagement Config Schemas, Defaults & Monotonic B2 Ranking', () => {
-  it('1. Bumps CORE_API_VERSION to 2.4.0 and exposes safe core defaults (enabled: false, sendEmails: false, empty wording)', () => {
-    expect(CORE_API_VERSION).toBe('2.4.0');
+  it('1. Bumps CORE_API_VERSION (^2.4.0) and exposes safe core defaults (enabled: false, sendEmails: false, empty wording)', () => {
+    expect(isCoreApiRangeCompatible(CORE_API_VERSION, '^2.4.0')).toBe(true);
     expect(NON_ENGAGEMENT_DOCUMENT_TYPE).toBe('non_engagement');
 
     const safeChasing = resolveChasingConfiguration(null);
@@ -155,7 +157,7 @@ describe('S1-06: Communication Chasing & Engagement Config Schemas, Defaults & M
     });
 
     expect(conflictRendered.reasonKey).toBe('conflict');
-    expect(conflictRendered.subject).toBe('Our recent enquiry (ENQ-2026-0042) — unable to act');
+    expect(conflictRendered.subject).toBe('Your recent enquiry (ENQ-2026-0042) — unable to act');
     const joined = conflictRendered.paragraphs.join('\n');
     expect(joined).toContain('Dear Alex Morgan,');
     expect(joined).toContain('For reasons of client confidentiality');
@@ -172,5 +174,29 @@ describe('S1-06: Communication Chasing & Engagement Config Schemas, Defaults & M
       feeEarnerOrSenderName: 'Harriet Vance',
     });
     expect(expertiseRendered.paragraphs.join('\n')).toContain('Maritime Salvage');
+  });
+
+  it('7. R846(c): sanitizePostgresError uses exact domain error allow-list rather than prefix matching', () => {
+    const leakByMessage = new Error('MATTER_UNLISTED_SQL_LEAK: relation "public.matters" failed');
+    const sanitizedMsgErr = sanitizePostgresError(leakByMessage, 'ctx');
+    expect(sanitizedMsgErr.message).toMatch(/^TENANCY_DATABASE_ERROR:/);
+    expect(sanitizedMsgErr.message).not.toContain('MATTER_UNLISTED_SQL_LEAK');
+    expect(sanitizedMsgErr.message).not.toContain('relation');
+
+    const leakByCode = Object.assign(new Error('raw pg driver failure'), {
+      code: 'MATTER_UNLISTED_SQL_LEAK',
+    });
+    const sanitizedCodeErr = sanitizePostgresError(leakByCode, 'ctx');
+    expect(sanitizedCodeErr.message).toMatch(/^TENANCY_DATABASE_ERROR:/);
+    expect(sanitizedCodeErr.message).not.toContain('MATTER_UNLISTED_SQL_LEAK');
+    expect(sanitizedCodeErr.code).toBeUndefined();
+
+    const allowedByMessage = new Error('MATTER_CONCURRENCY_CONFLICT: stale row');
+    expect(sanitizePostgresError(allowedByMessage, 'ctx')).toBe(allowedByMessage);
+
+    const allowedByCode = Object.assign(new Error('validation failed'), {
+      code: 'ENGAGEMENT_DISPATCH_INVALID',
+    });
+    expect(sanitizePostgresError(allowedByCode, 'ctx')).toBe(allowedByCode);
   });
 });

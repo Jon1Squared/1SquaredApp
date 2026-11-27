@@ -293,7 +293,7 @@ All `S1-06` open questions (`Q1`, `Q2`, `Q3`, `Q7`, `Q9`) were resolved by the p
 *(Note: Every variant states clearly that no solicitor–client relationship has been formed, warns of potential statutory time limits without giving legal advice on specific deadlines, and avoids disclosing confidential third-party details on `conflict` declines.)*
 
 - **`conflict` (`enquiry_close_reason.conflict`):**
-  - Subject: `Our recent enquiry ({{enquiryReference}}) — unable to act`
+  - Subject: `Your recent enquiry ({{enquiryReference}}) — unable to act`
   - Body:
     > Dear {{recipientName}},
     > Thank you for contacting Not A Law Firm LLP regarding your enquiry (Ref: {{enquiryReference}}).

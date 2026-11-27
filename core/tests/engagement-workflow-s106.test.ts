@@ -1376,7 +1376,8 @@ describe('S1-06: Client Care dispatch, Monotonic B2, R817 purpose decoupling, R8
     );
     expect(openVisible.ok).toBe(true);
     if (!openVisible.ok) return;
-    expect(openVisible.message.htmlBody).toContain('Client Care');
+    expect('htmlBody' in openVisible.message).toBe(false);
+    expect(openVisible.message.textBody).toContain('Client Care');
     expect(JSON.stringify(openVisible.message)).not.toContain('amlStatus');
 
     const dlVisibleRes = await runAsActionActor(

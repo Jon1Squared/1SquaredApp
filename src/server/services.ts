@@ -39493,14 +39493,10 @@ export async function listOutboxMessagesForAdminRecord(
       );
     }
 
-    const hasRestrictedMatterAccess = permSet.permissions.has(
-      'matter:restricted:access',
-    );
     const messages = await getOutboxRepository().listVisibleOutboxRecordsForAdmin(
       ctx,
       {
         viewerId: actor.id,
-        hasRestrictedMatterAccess,
         ...(filter.status ? { status: filter.status } : {}),
         limit: filter.limit,
         offset: filter.offset,
@@ -39550,15 +39546,11 @@ export async function getOutboxMessageForAdminRecord(
       );
     }
 
-    const hasRestrictedMatterAccess = permSet.permissions.has(
-      'matter:restricted:access',
-    );
     const message = await getOutboxRepository().getVisibleOutboxRecordForAdmin(
       ctx,
       {
         outboxId: cleanId,
         viewerId: actor.id,
-        hasRestrictedMatterAccess,
       },
     );
     if (!message) {
@@ -39626,15 +39618,11 @@ export async function downloadOutboxAttachmentForAdminRecord(
       );
     }
 
-    const hasRestrictedMatterAccess = permSet.permissions.has(
-      'matter:restricted:access',
-    );
     const attachment =
       await getOutboxRepository().getVisibleOutboxAttachmentForAdmin(ctx, {
         outboxId: cleanId,
         ordinal: input.ordinal,
         viewerId: actor.id,
-        hasRestrictedMatterAccess,
       });
     if (!attachment) {
       return registerServiceFailure(

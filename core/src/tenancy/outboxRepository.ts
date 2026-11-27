@@ -1230,7 +1230,6 @@ export class TenantOutboxRepository extends TenantScopedRepository {
     ctx: TenantContext,
     params: {
       readonly viewerId: string;
-      readonly hasRestrictedMatterAccess?: boolean;
       readonly status?: EmailOutboxStatus;
       readonly limit?: number;
       readonly offset?: number;
@@ -1312,16 +1311,15 @@ export class TenantOutboxRepository extends TenantScopedRepository {
   }
 
   /**
-   * Loads one linked outbox message (including body) only if it satisfies R826 linkage
-   * and R823 visibility for `viewerId`. Returns `null` when missing, cross-tenant, unlinked,
-   * or belonging to a hidden matter/quote/enquiry (uniform NOT_FOUND at caller level).
+   * Loads one linked outbox message (omitting raw HTML body per R846) only if it satisfies
+   * R826 linkage and R823 visibility for `viewerId`. Returns `null` when missing, cross-tenant,
+   * unlinked, or belonging to a hidden matter/quote/enquiry (uniform NOT_FOUND at caller level).
    */
   public async getVisibleOutboxRecordForAdmin(
     ctx: TenantContext,
     params: {
       readonly outboxId: string;
       readonly viewerId: string;
-      readonly hasRestrictedMatterAccess?: boolean;
     },
   ): Promise<EmailOutboxAdminDetail | null> {
     const cleanId = params.outboxId?.trim() ?? '';
@@ -1330,8 +1328,33 @@ export class TenantOutboxRepository extends TenantScopedRepository {
     const visibilitySql = buildAdminOutboxVisibleWhereSql();
 
     return this.withTenantReadTransaction(ctx, async (tx) => {
-      const res = await tx.query<DbEmailOutboxRow>(
-        `SELECT eo.*
+      const res = await tx.query<{
+        tenant_id: string;
+        id: string;
+        template_key: string;
+        recipients_json: unknown;
+        subject: string | null;
+        text_body: string | null;
+        attachments_json: unknown;
+        status: string;
+        attempt_count: number | string;
+        next_attempt_at: Date | string;
+        sent_at: Date | string | null;
+        provider_message_id: string | null;
+        last_error_code: string | null;
+        content_scrubbed_at: Date | string | null;
+        matter_id: string | null;
+        quote_id: string | null;
+        enquiry_id: string | null;
+        created_by_person_id: string | null;
+        created_at: Date | string;
+        updated_at: Date | string;
+      }>(
+        `SELECT eo.tenant_id, eo.id, eo.template_key, eo.recipients_json, eo.subject,
+                eo.text_body, eo.attachments_json, eo.status, eo.attempt_count,
+                eo.next_attempt_at, eo.sent_at, eo.provider_message_id, eo.last_error_code,
+                eo.content_scrubbed_at, eo.matter_id, eo.quote_id, eo.enquiry_id,
+                eo.created_by_person_id, eo.created_at, eo.updated_at
            FROM public.email_outbox eo
           WHERE eo.tenant_id = $1
             AND eo.id = $3
@@ -1348,7 +1371,6 @@ export class TenantOutboxRepository extends TenantScopedRepository {
         templateKey: row.template_key,
         recipients: normalizeRecipients(row.recipients_json),
         subject: row.subject ?? null,
-        htmlBody: row.html_body ?? null,
         textBody: row.text_body ?? null,
         attachments: normalizeAttachments(row.attachments_json),
         status: row.status as EmailOutboxStatus,
@@ -1378,7 +1400,6 @@ export class TenantOutboxRepository extends TenantScopedRepository {
       readonly outboxId: string;
       readonly ordinal: number;
       readonly viewerId: string;
-      readonly hasRestrictedMatterAccess?: boolean;
     },
   ): Promise<EmailOutboxAdminAttachmentResult | null> {
     const cleanId = params.outboxId?.trim() ?? '';

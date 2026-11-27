@@ -2313,7 +2313,7 @@
     "clientCareSignatureInstruction": "Please sign and date the confirmation section of this letter and return a scanned copy or clear photograph to your fee earner by email so we can record your acceptance and proceed with your matter.",
     "nonEngagementWording": {
       "conflict": {
-        "subjectTemplate": "Our recent enquiry ({{enquiryReference}}) — unable to act",
+        "subjectTemplate": "Your recent enquiry ({{enquiryReference}}) — unable to act",
         "bodyParagraphs": [
           "Dear {{recipientName}},",
           "Thank you for contacting Not A Law Firm LLP regarding your enquiry (Ref: {{enquiryReference}}).",

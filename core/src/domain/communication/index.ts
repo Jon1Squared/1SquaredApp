@@ -9,16 +9,18 @@
  *   conflicting party or matter details).
  */
 
-import type {
-  ChasingConfiguration,
-  ChasingRuleConfig,
-  CommunicationChaseEntityKind,
-  EngagementConfiguration,
-  NonEngagementReasonKey,
-  NonEngagementReasonWordingConfig,
-  NonEngagementWordingMap,
-  TenantConfiguration,
+import {
+  getEngagementStatusRank,
+  type ChasingConfiguration,
+  type ChasingRuleConfig,
+  type CommunicationChaseEntityKind,
+  type EngagementConfiguration,
+  type NonEngagementReasonKey,
+  type NonEngagementReasonWordingConfig,
+  type NonEngagementWordingMap,
+  type TenantConfiguration,
 } from '../../api/index';
+export { getEngagementStatusRank };
 
 export const DEFAULT_CHASING_RULE_CONFIG: Readonly<ChasingRuleConfig> = Object.freeze({
   enabled: false,
@@ -52,27 +54,6 @@ export const DEFAULT_ENGAGEMENT_CONFIGURATION: Readonly<EngagementConfiguration>
     defaultFallback: DEFAULT_EMPTY_NON_ENGAGEMENT_REASON_WORDING,
   }),
 });
-
-/**
- * Returns the monotonic progression rank of a matter's B2 engagement letter status:
- * - `0`: `'' | 'Drafting'` (not yet drafted)
- * - `1`: `'Drafted'`
- * - `2`: `'Sent' | 'Sent to client'`
- * - `3`: `'Signed' | 'Signed & returned'`
- */
-export function getEngagementStatusRank(status: string | null | undefined): 0 | 1 | 2 | 3 {
-  const normalized = (status ?? '').trim().toLowerCase();
-  if (normalized === 'signed' || normalized === 'signed & returned') {
-    return 3;
-  }
-  if (normalized === 'sent' || normalized === 'sent to client') {
-    return 2;
-  }
-  if (normalized === 'drafted') {
-    return 1;
-  }
-  return 0;
-}
 
 export function isEngagementStatusRegression(
   previousStatus: string | null | undefined,
@@ -125,92 +106,15 @@ function normalizeChasingRule(
 
 /**
  * Resolves the tenant's full chasing configuration with safe core defaults
- * (`enabled: false`, `sendEmails: false`, `7 / 14 / 21` days).
- * Reads every schema leaf directly so unused/dead-key checks stay verified.
+ * (`enabled: false`, `sendEmails: false`, `7 / 14 / 21` days) via `normalizeChasingRule`.
  */
 export function resolveChasingConfiguration(
   config?: Pick<TenantConfiguration, 'chasing'> | null,
 ): ChasingConfiguration {
-  const engagementLetter = config?.chasing?.engagementLetter;
-  const quote = config?.chasing?.quote;
-  const moneyOnAccount = config?.chasing?.moneyOnAccount;
-
   return {
-    engagementLetter: {
-      enabled:
-        typeof engagementLetter?.enabled === 'boolean'
-          ? engagementLetter.enabled
-          : DEFAULT_CHASING_RULE_CONFIG.enabled,
-      sendEmails:
-        typeof engagementLetter?.sendEmails === 'boolean'
-          ? engagementLetter.sendEmails
-          : DEFAULT_CHASING_RULE_CONFIG.sendEmails,
-      firstChaseDays:
-        typeof engagementLetter?.firstChaseDays === 'number' &&
-        Number.isInteger(engagementLetter.firstChaseDays)
-          ? engagementLetter.firstChaseDays
-          : DEFAULT_CHASING_RULE_CONFIG.firstChaseDays,
-      secondChaseDays:
-        typeof engagementLetter?.secondChaseDays === 'number' &&
-        Number.isInteger(engagementLetter.secondChaseDays)
-          ? engagementLetter.secondChaseDays
-          : DEFAULT_CHASING_RULE_CONFIG.secondChaseDays,
-      escalateTaskDays:
-        typeof engagementLetter?.escalateTaskDays === 'number' &&
-        Number.isInteger(engagementLetter.escalateTaskDays)
-          ? engagementLetter.escalateTaskDays
-          : DEFAULT_CHASING_RULE_CONFIG.escalateTaskDays,
-    },
-    quote: {
-      enabled:
-        typeof quote?.enabled === 'boolean'
-          ? quote.enabled
-          : DEFAULT_CHASING_RULE_CONFIG.enabled,
-      sendEmails:
-        typeof quote?.sendEmails === 'boolean'
-          ? quote.sendEmails
-          : DEFAULT_CHASING_RULE_CONFIG.sendEmails,
-      firstChaseDays:
-        typeof quote?.firstChaseDays === 'number' &&
-        Number.isInteger(quote.firstChaseDays)
-          ? quote.firstChaseDays
-          : DEFAULT_CHASING_RULE_CONFIG.firstChaseDays,
-      secondChaseDays:
-        typeof quote?.secondChaseDays === 'number' &&
-        Number.isInteger(quote.secondChaseDays)
-          ? quote.secondChaseDays
-          : DEFAULT_CHASING_RULE_CONFIG.secondChaseDays,
-      escalateTaskDays:
-        typeof quote?.escalateTaskDays === 'number' &&
-        Number.isInteger(quote.escalateTaskDays)
-          ? quote.escalateTaskDays
-          : DEFAULT_CHASING_RULE_CONFIG.escalateTaskDays,
-    },
-    moneyOnAccount: {
-      enabled:
-        typeof moneyOnAccount?.enabled === 'boolean'
-          ? moneyOnAccount.enabled
-          : DEFAULT_CHASING_RULE_CONFIG.enabled,
-      sendEmails:
-        typeof moneyOnAccount?.sendEmails === 'boolean'
-          ? moneyOnAccount.sendEmails
-          : DEFAULT_CHASING_RULE_CONFIG.sendEmails,
-      firstChaseDays:
-        typeof moneyOnAccount?.firstChaseDays === 'number' &&
-        Number.isInteger(moneyOnAccount.firstChaseDays)
-          ? moneyOnAccount.firstChaseDays
-          : DEFAULT_CHASING_RULE_CONFIG.firstChaseDays,
-      secondChaseDays:
-        typeof moneyOnAccount?.secondChaseDays === 'number' &&
-        Number.isInteger(moneyOnAccount.secondChaseDays)
-          ? moneyOnAccount.secondChaseDays
-          : DEFAULT_CHASING_RULE_CONFIG.secondChaseDays,
-      escalateTaskDays:
-        typeof moneyOnAccount?.escalateTaskDays === 'number' &&
-        Number.isInteger(moneyOnAccount.escalateTaskDays)
-          ? moneyOnAccount.escalateTaskDays
-          : DEFAULT_CHASING_RULE_CONFIG.escalateTaskDays,
-    },
+    engagementLetter: normalizeChasingRule(config?.chasing?.engagementLetter),
+    quote: normalizeChasingRule(config?.chasing?.quote),
+    moneyOnAccount: normalizeChasingRule(config?.chasing?.moneyOnAccount),
   };
 }
 

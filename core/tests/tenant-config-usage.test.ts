@@ -371,6 +371,18 @@ const SUBTREE_ALIASES_BY_PARENT_PATH: Readonly<
     aliases: ['fieldDef'],
     scopeAnchor: /\b(?:applyRegisterTypeOverride|cloneFieldDefinition)\b/,
   },
+  'chasing.engagementLetter': {
+    aliases: ['raw'],
+    scopeAnchor: /\bnormalizeChasingRule\b/,
+  },
+  'chasing.quote': {
+    aliases: ['raw'],
+    scopeAnchor: /\bnormalizeChasingRule\b/,
+  },
+  'chasing.moneyOnAccount': {
+    aliases: ['raw'],
+    scopeAnchor: /\bnormalizeChasingRule\b/,
+  },
 };
 
 function isLeafReferencedInRuntime(

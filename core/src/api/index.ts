@@ -661,6 +661,29 @@ export interface DocumentStorageProvider {
 export const CLIENT_CARE_DOCUMENT_TYPE = 'client_care' as const;
 export const NON_ENGAGEMENT_DOCUMENT_TYPE = 'non_engagement' as const;
 
+/**
+ * Returns the monotonic progression rank of a matter's B2 engagement letter status:
+ * - `0`: `'' | 'Drafting'` (not yet drafted)
+ * - `1`: `'Drafted'`
+ * - `2`: `'Sent' | 'Sent to client'`
+ * - `3`: `'Signed' | 'Signed & returned'`
+ */
+export function getEngagementStatusRank(
+  status: string | null | undefined,
+): 0 | 1 | 2 | 3 {
+  const normalized = (status ?? '').trim().toLowerCase();
+  if (normalized === 'signed' || normalized === 'signed & returned') {
+    return 3;
+  }
+  if (normalized === 'sent' || normalized === 'sent to client') {
+    return 2;
+  }
+  if (normalized === 'drafted') {
+    return 1;
+  }
+  return 0;
+}
+
 export type TemplateStatus =
   | 'Draft'
   | 'Submitted'
@@ -2172,7 +2195,6 @@ export interface EmailOutboxAdminListItem {
 }
 
 export interface EmailOutboxAdminDetail extends EmailOutboxAdminListItem {
-  readonly htmlBody: string | null;
   readonly textBody: string | null;
   readonly providerMessageId: string | null;
 }
