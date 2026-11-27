@@ -7173,6 +7173,27 @@ async function ensurePersonHasRoleInTx(
   return updated;
 }
 
+function validateRetainerMoniesOnAccountInput(value: unknown): string | null {
+  if (value === undefined || value === null) return null;
+  if (typeof value !== 'number' || !Number.isFinite(value)) {
+    return 'Retainer / monies on account must be a valid finite number.';
+  }
+  if (value < 0) {
+    return 'Retainer / monies on account must be zero or more.';
+  }
+  const str = String(Object.is(value, -0) ? 0 : value);
+  if (/[eE]/.test(str)) {
+    return 'Retainer / monies on account must be entered as a standard decimal number with at most two decimal places.';
+  }
+  if (!/^\d+(?:\.\d{1,2})?$/.test(str)) {
+    return 'Retainer / monies on account must have at most two decimal places.';
+  }
+  if (value > 90_071_992_547_409.91) {
+    return 'Retainer / monies on account exceeds the maximum supported amount.';
+  }
+  return null;
+}
+
 export async function saveMatterRecord(
   input: Omit<
     Partial<Matter>,
@@ -7390,6 +7411,22 @@ export async function saveMatterRecord(
     errors.engagementLetterStatus =
       'Engagement letter cannot be marked as signed directly on matter save. Use "Mark engagement signed" instead.';
   }
+  const retainerError = validateRetainerMoniesOnAccountInput(
+    input.retainerMoniesOnAccountGbp,
+  );
+  if (retainerError) {
+    errors.retainerMoniesOnAccountGbp = retainerError;
+  }
+  if (
+    input.retainerMoniesOnAccountPence !== undefined &&
+    input.retainerMoniesOnAccountPence !== null &&
+    (typeof input.retainerMoniesOnAccountPence !== 'number' ||
+      !Number.isSafeInteger(input.retainerMoniesOnAccountPence) ||
+      input.retainerMoniesOnAccountPence < 0)
+  ) {
+    errors.retainerMoniesOnAccountPence =
+      'Retainer / monies on account must be zero or more in whole pence.';
+  }
 
   // Validate questionnaire answers against MATTER_RISK_SECTIONS; discard any client-supplied sections, overallRisk or scores (S0-08 / B1)
   const rawRiskAssessmentInput =
@@ -7495,7 +7532,15 @@ export async function saveMatterRecord(
 
   resolvedMatterCtx = extensionCtx;
   if (Object.keys(errors).length > 0) {
-    return { matter: null, errors };
+    const validationMsg =
+      errors.retainerMoniesOnAccountGbp ?? errors.retainerMoniesOnAccountPence;
+    return {
+      matter: null,
+      ...(validationMsg
+        ? { code: 'VALIDATION_ERROR', message: validationMsg }
+        : {}),
+      errors,
+    };
   }
 
   const resolvedMatterPartiesForLoad = input.parties ?? existing?.parties ?? [];

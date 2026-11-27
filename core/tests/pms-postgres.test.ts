@@ -2660,4 +2660,71 @@ describe('S0-18: PostgreSQL Per-Tenant PMS Data & PMS Links Repository, ADR 0029
     expect(mfStored?.client_account_balance_pence).toBe(99999);
     expect(mfStored?.client_account_balance).toBe(999.99);
   });
+
+  it('R830: saveMatterRecord validates retainerMoniesOnAccountGbp before reaching DB (-1, 1e-7, 0.001, NaN rejected with VALIDATION_ERROR; 1250.50 accepted)', async () => {
+    const { ctx, actorSession } = makeHostActorAndContext('P-000001');
+    const matterRepo = getMatterRepository();
+
+    await runWithActiveActorSession(actorSession, async () => {
+      const seedStore = loadCommittedSeedStore();
+      await importFirmStoreModulesToPostgres({
+        ctx,
+        store: seedStore,
+        modules: ['parties', 'matters', 'tasks', 'hr', 'catalogues'],
+        clearFirst: true,
+      });
+
+      const baseMatter = (
+        await matterRepo.listAllMattersUnfiltered<import('@/domain/types').Matter>(ctx)
+      ).find((m) => !m.isStaffMatter)!;
+      expect(baseMatter).toBeDefined();
+      const {
+        id: matterId,
+        retainerMoniesOnAccountPence: _ignoredOldPence,
+        ...matterPayload
+      } = baseMatter;
+      void _ignoredOldPence;
+
+      for (const badValue of [-1, 1e-7, 0.001, Number.NaN]) {
+        const res = await saveMatterRecord(
+          {
+            ...matterPayload,
+            retainerMoniesOnAccountGbp: badValue,
+          },
+          {
+            id: matterId,
+            byId: 'P-000001',
+            expectedRowVersion: baseMatter.rowVersion ?? 1,
+          },
+        );
+        expect(res.matter).toBeNull();
+        expect(res.code).toBe('VALIDATION_ERROR');
+        expect(res.message).toMatch(/retainer \/ monies on account/i);
+        expect(res.errors?.retainerMoniesOnAccountGbp).toBe(res.message);
+      }
+
+      const validRes = await saveMatterRecord(
+        {
+          ...matterPayload,
+          retainerMoniesOnAccountGbp: 1250.5,
+        },
+        {
+          id: matterId,
+          byId: 'P-000001',
+          expectedRowVersion: baseMatter.rowVersion ?? 1,
+        },
+      );
+      expect(validRes.errors).toBeUndefined();
+      expect(validRes.matter).not.toBeNull();
+      expect(validRes.matter?.retainerMoniesOnAccountGbp).toBe(1250.5);
+      expect(validRes.matter?.retainerMoniesOnAccountPence).toBe(125050);
+
+      const reloaded = await matterRepo.getMatterById<import('@/domain/types').Matter>(
+        ctx,
+        baseMatter.id,
+      );
+      expect(reloaded?.retainerMoniesOnAccountGbp).toBe(1250.5);
+      expect(reloaded?.retainerMoniesOnAccountPence).toBe(125050);
+    });
+  });
 });
