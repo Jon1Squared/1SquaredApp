@@ -65,6 +65,7 @@ import {
   sendNonEngagementLetterRecord,
   startOrLoadClientCddRecord,
   stopCommunicationChaseRecord,
+  updateMatterLifecycleStatusRecord,
   uploadEvidenceArtifactRecord,
 } from '@/server/services';
 import {
@@ -2803,4 +2804,271 @@ describe('S1-06: Client Care dispatch, Monotonic B2, R817 purpose decoupling, R8
       chaseAudits.filter((a) => a.field === 'Communication chase stopped'),
     ).toHaveLength(1);
   }, 45_000);
+
+  it('11. R838: closing, archiving, or deleting a matter stops active chases in the same transaction, and missing-matter backstop records entity_missing', async () => {
+    await resetAllDemoData('P-000004', testDataResetContext());
+    const ctx = testTenantCtx('P-000001');
+    const matterRepo = new TenantMatterRepository();
+    const chasingRepo = new TenantChasingRepository();
+    const auditRepo = new TenantAuditRepository();
+
+    const chaseEnabledCfg = loadAndValidateTenantConfig(
+      {
+        ...(notALawFirmBaseConfig as unknown as Record<string, unknown>),
+        tenantId: 'not-a-law-firm',
+        integrations: {
+          ...((notALawFirmBaseConfig as unknown as { integrations: Record<string, unknown> })
+            .integrations ?? {}),
+          email: { provider: 'disabled' },
+        },
+        chasing: {
+          engagementLetter: {
+            enabled: true,
+            sendEmails: true,
+            firstChaseDays: 7,
+            secondChaseDays: 14,
+            escalateTaskDays: 21,
+          },
+          quote: {
+            enabled: false,
+            sendEmails: false,
+            firstChaseDays: 7,
+            secondChaseDays: 14,
+            escalateTaskDays: 21,
+          },
+          moneyOnAccount: {
+            enabled: false,
+            sendEmails: false,
+            firstChaseDays: 7,
+            secondChaseDays: 14,
+            escalateTaskDays: 21,
+          },
+        },
+      },
+      { tenantId: 'not-a-law-firm', environment: 'test' },
+      'test',
+    );
+
+    // Ensure O-000001 has complete CDD so employment_and_hr matters open immediately
+    await runAsActionActor(
+      'P-000001',
+      async () => {
+        const cddLoad = await startOrLoadClientCddRecord(
+          { subjectType: 'organisation', subjectId: 'O-000001', createIfMissing: true },
+          'P-000001',
+        );
+        expect(cddLoad.ok).toBe(true);
+        if (!cddLoad.ok) return;
+        const cddUp = await uploadEvidenceArtifactRecord(
+          {
+            subjectType: 'organisation',
+            subjectId: 'O-000001',
+            purpose: 'cdd',
+            fileName: 'cdd-r838.pdf',
+            contentType: 'application/pdf',
+            bytes: Buffer.from('%PDF-1.4\n% CDD R838\n%%EOF\n'),
+          },
+          'P-000001',
+        );
+        expect(cddUp.ok).toBe(true);
+        if (!cddUp.ok) return;
+        await recordManualSanctionsPepRecord(
+          {
+            subjectType: 'organisation',
+            subjectId: 'O-000001',
+            outcome: 'clear',
+            screeningScope: 'UK Sanctions list',
+            referenceCode: 'SP-R838',
+          },
+          'P-000001',
+        );
+        for (const item of cddLoad.summary.checklistItems) {
+          await recordCddChecklistItemRecord(
+            {
+              recordId: cddLoad.summary.recordId!,
+              itemKey: item.itemKey,
+              status: 'recorded',
+              evidenceRefs: [cddUp.evidenceRef],
+            },
+            'P-000001',
+          );
+        }
+        const comp = await completeClientCddRecord(
+          { recordId: cddLoad.summary.recordId! },
+          'P-000001',
+        );
+        expect(comp.ok).toBe(true);
+      },
+      { roles: ['partner'], mfaVerified: false },
+    );
+
+    const matterIds: string[] = [];
+    const chaseIds: string[] = [];
+    await runAsActionActor(
+      'P-000001',
+      async () => {
+        for (const label of ['Close', 'Archive', 'Delete']) {
+          const m = await saveMatterRecord(
+            {
+              title: `R838 ${label} Matter`,
+              clientId: 'O-000001',
+              practiceAreaId: 'work_type.employment_and_hr',
+              workTypeSubcategoryId: 'work_type.employment_and_hr_employment_contracts',
+              responsiblePartnerId: 'P-000001',
+              supervisingPartnerId: 'P-000001',
+              leadFeeEarnerId: 'P-000002',
+              teamMemberIds: ['P-000001', 'P-000002'],
+              conflictCheckRecord: makeConflictRecord('P-000001', `R838 ${label}`),
+              riskAssessment: { answers: BASE_LOW_RISK_ANSWERS },
+            },
+            { byId: 'P-000001', saveMode: 'submit_cleared' },
+          );
+          expect(m.errors).toBeUndefined();
+          expect(m.matter?.matterStatusId).toBe('matter_status.active');
+          matterIds.push(m.matter!.id);
+        }
+      },
+      { roles: ['partner'], mfaVerified: false },
+    );
+
+    for (let i = 0; i < matterIds.length; i++) {
+      const sent = await runAsActionActor(
+        'P-000001',
+        () =>
+          sendEngagementLetterRecord(
+            { matterId: matterIds[i]!, recipientEmail: `r838-${i}@example.test` },
+            'P-000001',
+            { tenantConfig: chaseEnabledCfg, drainAfterCommit: false },
+          ),
+        { roles: ['partner'], mfaVerified: false },
+      );
+      expect(sent.ok).toBe(true);
+      if (!sent.ok || !sent.chase) return;
+      chaseIds.push(sent.chase.id);
+    }
+
+    const [mCloseId, mArchiveId, mDeleteId] = matterIds as [string, string, string];
+    const [cCloseId, cArchiveId, cDeleteId] = chaseIds as [string, string, string];
+
+    // 1. Closing via updateMatterLifecycleStatusRecord stops the chase in the SAME TX (zero job run needed)
+    const mCloseFresh = await matterRepo.getMatterById<Matter>(ctx, mCloseId, {
+      includeRestricted: true,
+    });
+    const closedRes = await runAsActionActor(
+      'P-000001',
+      () =>
+        updateMatterLifecycleStatusRecord(
+          mCloseId,
+          'close',
+          {
+            reason: 'Matter concluded prior to signing',
+            expectedRowVersion: mCloseFresh?.rowVersion ?? null,
+          },
+          'P-000001',
+        ),
+      { roles: ['partner'], mfaVerified: false },
+    );
+    expect(closedRes.errors).toBeUndefined();
+    expect(closedRes.matter).toBeTruthy();
+
+    const chaseAfterClose = await chasingRepo.getChaseById(ctx, cCloseId);
+    expect(chaseAfterClose?.status).toBe('stopped');
+    expect(chaseAfterClose?.stoppedReason).toBe('matter_closed');
+    expect(chaseAfterClose?.nextActionAt).toBeNull();
+
+    const closeAudits = await auditRepo.listAuditEntriesForRecord(
+      ctx,
+      'communication_chase',
+      cCloseId,
+      { limit: 50 },
+    );
+    expect(
+      closeAudits.some(
+        (a) =>
+          a.field === 'Communication chase stopped' &&
+          a.newValue === 'stopped (matter_closed)',
+      ),
+    ).toBe(true);
+
+    // 2. Archiving via saveMatterRecord stops the chase in the SAME TX with stoppedReason: 'matter_closed'
+    const mArchiveFresh = await matterRepo.getMatterById<Matter>(ctx, mArchiveId, {
+      includeRestricted: true,
+    });
+    const archiveSave = await runAsActionActor(
+      'P-000001',
+      () =>
+        saveMatterRecord(
+          {
+            ...mArchiveFresh!,
+            closedAt: undefined,
+            matterStatusId: vid('matter_status', 'Archived'),
+          },
+          {
+            id: mArchiveId,
+            byId: 'P-000001',
+            expectedRowVersion: mArchiveFresh?.rowVersion ?? undefined,
+          },
+        ),
+      { roles: ['partner'], mfaVerified: false },
+    );
+    expect(archiveSave.errors).toBeUndefined();
+
+    const chaseAfterArchive = await chasingRepo.getChaseById(ctx, cArchiveId);
+    expect(chaseAfterArchive?.status).toBe('stopped');
+    expect(chaseAfterArchive?.stoppedReason).toBe('matter_closed');
+    expect(chaseAfterArchive?.nextActionAt).toBeNull();
+
+    const archiveAudits = await auditRepo.listAuditEntriesForRecord(
+      ctx,
+      'communication_chase',
+      cArchiveId,
+      { limit: 50 },
+    );
+    expect(
+      archiveAudits.some(
+        (a) =>
+          a.field === 'Communication chase stopped' &&
+          a.newValue === 'stopped (matter_closed)',
+      ),
+    ).toBe(true);
+
+    // 3. Deleting a matter via deleteMatterById stops active chases in the SAME TX with entity_missing
+    const deleted = await matterRepo.deleteMatterById(ctx, mDeleteId);
+    expect(deleted).toBe(true);
+    const chaseAfterDelete = await chasingRepo.getChaseById(ctx, cDeleteId);
+    expect(chaseAfterDelete?.status).toBe('stopped');
+    expect(chaseAfterDelete?.stoppedReason).toBe('entity_missing');
+    expect(chaseAfterDelete?.nextActionAt).toBeNull();
+
+    // 4. Job backstop: a due active chase pointing to a non-existent matter records entity_missing (never 'withdrawn')
+    const orphanSentAt = new Date('2026-10-01T08:00:00.000Z').toISOString();
+    const orphanDueAt = new Date('2026-10-08T08:00:00.000Z').toISOString();
+    const { chase: orphanChase } = await chasingRepo.withTenantTransaction(ctx, (tx) =>
+      chasingRepo.startOrReplaceChaseInTx(tx, ctx, {
+        entityKind: 'engagement_letter',
+        entityId: 'M-NON-EXISTENT-R838',
+        matterId: 'M-NON-EXISTENT-R838',
+        recipientEmail: 'orphan@example.test',
+        recipientName: 'Orphan Prospect',
+        sentAt: orphanSentAt,
+        nextActionAt: orphanDueAt,
+        createdByPersonId: 'P-000001',
+      }),
+    );
+
+    const sweepNow = new Date('2026-10-10T09:00:00.000Z');
+    const sweepRes = await executeCommunicationChasesForTenant(ctx, {
+      triggerSource: 'scheduled',
+      triggeredById: 'system:communication-chases',
+      tenantConfig: chaseEnabledCfg,
+      drainAfterCommit: false,
+      now: sweepNow,
+    });
+    expect(sweepRes.outcome).toBe('executed');
+
+    const orphanAfterJob = await chasingRepo.getChaseById(ctx, orphanChase.id);
+    expect(orphanAfterJob?.status).toBe('stopped');
+    expect(orphanAfterJob?.stoppedReason).toBe('entity_missing');
+    expect(orphanAfterJob?.nextActionAt).toBeNull();
+  }, 60_000);
 });

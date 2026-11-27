@@ -9517,6 +9517,60 @@ export async function saveMatterRecord(
       });
       matter = saved;
 
+      if (isClosedOrArchivedMatterStatus(matter.matterStatusId, inTxDbValues)) {
+        const stoppedChases = await getChasingRepository().stopActiveChasesForMatterInTx(
+          tx,
+          extensionCtx,
+          {
+            matterId: matter.id,
+            reason: 'matter_closed',
+            stoppedByPersonId: opts.byId,
+            stoppedAt: now,
+          },
+        );
+        if (stoppedChases.length > 0) {
+          await appendTenantAuditEntries(
+            extensionCtx,
+            stoppedChases.map((stoppedChase) => ({
+              recordType: 'communication_chase' as const,
+              recordId: stoppedChase.id,
+              action: 'update' as const,
+              field: 'Communication chase stopped',
+              oldValue: 'active',
+              newValue: `stopped (${stoppedChase.stoppedReason ?? 'matter_closed'})`,
+              byId: opts.byId,
+              at: now,
+            })),
+          );
+        }
+      } else if (isMatterEngagementSignedForGate(matter)) {
+        const stoppedChases = await getChasingRepository().stopActiveChasesForMatterInTx(
+          tx,
+          extensionCtx,
+          {
+            matterId: matter.id,
+            reason: 'signed',
+            stoppedByPersonId: opts.byId,
+            stoppedAt: now,
+          },
+        );
+        if (stoppedChases.length > 0) {
+          await appendTenantAuditEntries(
+            extensionCtx,
+            stoppedChases.map((stoppedChase) => ({
+              recordType: 'communication_chase' as const,
+              recordId: stoppedChase.id,
+              action: 'update' as const,
+              field: 'Communication chase stopped',
+              oldValue: 'active',
+              newValue: `stopped (${stoppedChase.stoppedReason ?? 'signed'})`,
+              byId: opts.byId,
+              at: now,
+            })),
+          );
+        }
+      }
+
       const pendingPersonIdSet = new Set(pendingPeople.map((p) => p.id));
       for (const clientPersonId of individualClientPersonIds) {
         if (pendingPersonIdSet.has(clientPersonId)) continue;
@@ -27925,6 +27979,34 @@ export async function updateMatterLifecycleStatusRecord(
               : null,
         });
 
+        if (action === 'close') {
+          const stoppedChases = await getChasingRepository().stopActiveChasesForMatterInTx(
+            tx,
+            ctx,
+            {
+              matterId: saved.id,
+              reason: 'matter_closed',
+              stoppedByPersonId: actorId,
+              stoppedAt: now,
+            },
+          );
+          if (stoppedChases.length > 0) {
+            await appendTenantAuditEntries(
+              ctx,
+              stoppedChases.map((stoppedChase) => ({
+                recordType: 'communication_chase' as const,
+                recordId: stoppedChase.id,
+                action: 'update' as const,
+                field: 'Communication chase stopped',
+                oldValue: 'active',
+                newValue: `stopped (${stoppedChase.stoppedReason ?? 'matter_closed'})`,
+                byId: actorId,
+                at: now,
+              })),
+            );
+          }
+        }
+
         writeAudit(null, {
           recordType: 'matter',
           recordId: saved.id,
@@ -37188,13 +37270,31 @@ export async function recordEngagementLetterSignedRecord(
         },
       );
 
-      await getChasingRepository().stopActiveChaseInTx(tx, ctx, {
-        entityKind: 'engagement_letter',
-        entityId: saved.id,
-        reason: 'signed',
-        stoppedByPersonId: actor.id,
-        stoppedAt: nowIso,
-      });
+      const stoppedChase = await getChasingRepository().stopActiveChaseInTx(
+        tx,
+        ctx,
+        {
+          entityKind: 'engagement_letter',
+          entityId: saved.id,
+          reason: 'signed',
+          stoppedByPersonId: actor.id,
+          stoppedAt: nowIso,
+        },
+      );
+      if (stoppedChase) {
+        await appendTenantAuditEntries(ctx, [
+          {
+            recordType: 'communication_chase',
+            recordId: stoppedChase.id,
+            action: 'update',
+            field: 'Communication chase stopped',
+            oldValue: 'active',
+            newValue: `stopped (${stoppedChase.stoppedReason ?? 'signed'})`,
+            byId: actor.id,
+            at: nowIso,
+          },
+        ]);
+      }
 
       await appendTenantAuditEntries(ctx, [
         {
@@ -39648,11 +39748,11 @@ const ENGAGEMENT_LETTER_CHASE_ADAPTER: CommunicationChaseAdapter<Matter> = {
       matterId,
       { includeRestricted: true },
     );
-    if (
-      !matter ||
-      isClosedOrArchivedMatterStatus(matter.matterStatusId, store.values)
-    ) {
-      return { stop: true, reason: 'withdrawn' };
+    if (!matter) {
+      return { stop: true, reason: 'entity_missing' };
+    }
+    if (isClosedOrArchivedMatterStatus(matter.matterStatusId, store.values)) {
+      return { stop: true, reason: 'matter_closed' };
     }
     if (isMatterEngagementSignedForGate(matter)) {
       return { stop: true, reason: 'signed' };

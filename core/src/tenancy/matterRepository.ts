@@ -3598,6 +3598,22 @@ export class TenantMatterRepository extends TenantScopedRepository {
         }
       }
 
+      const chaseStopNowIso = new Date().toISOString();
+      const chaseStopActorId = ctx.actorId || 'system';
+      await tx.query(
+        `UPDATE public.communication_chases
+            SET status = 'stopped',
+                stopped_reason = 'entity_missing',
+                stopped_at = $3::timestamptz,
+                stopped_by_person_id = $4,
+                next_action_at = NULL,
+                updated_at = $3::timestamptz
+          WHERE tenant_id = $1
+            AND matter_id = $2
+            AND status IN ('active', 'needs_owner')`,
+        [ctx.tenantId, id, chaseStopNowIso, chaseStopActorId],
+      );
+
       await tx.query(
         'DELETE FROM public.matter_parties WHERE tenant_id = $1 AND matter_id = $2',
         [ctx.tenantId, id],
