@@ -394,6 +394,7 @@ import {
   resolveTeamsIntegrationConfig,
   resolveTenantIsoWeekday,
   resolveTenantLocalDateAndHour,
+  computeNextLocalDayRunTimeIso,
   runTenantBackgroundJob,
   sanitizeJobErrorCode,
   scanBytesForMalwareAndMacros,
@@ -40332,6 +40333,7 @@ export async function executeCommunicationChasesForTenant(
                 tx,
                 ctx,
                 candidate.id,
+                nowIso,
               );
               if (!lockedChase) {
                 skippedCount += 1;
@@ -40411,6 +40413,11 @@ export async function executeCommunicationChasesForTenant(
                     : 1;
               const actionKind =
                 stepIndex === 3 ? 'escalation_task' : 'chase_email';
+              const retryNextActionAt = computeNextLocalDayRunTimeIso(
+                now,
+                effectiveTimeZone,
+                options.defaultRunHourLocal ?? 8,
+              );
               const failRes = await chasingRepo.recordChaseFailureInTx(tx, ctx, {
                 chaseId: candidate.id,
                 stepIndex,
@@ -40418,6 +40425,7 @@ export async function executeCommunicationChasesForTenant(
                 errorCode,
                 executedAt: nowIso,
                 maxConsecutiveFailures: 3,
+                retryNextActionAt,
               });
               await appendTenantAuditEntries(ctx, [
                 buildZeroPiiChaseStepAuditEntry({
@@ -40432,10 +40440,11 @@ export async function executeCommunicationChasesForTenant(
                 }),
               ]);
               if (failRes.markedFailed) {
-                const failAdapter = COMMUNICATION_CHASE_ADAPTERS.get(
-                  candidate.entityKind,
-                );
-                if (failAdapter) {
+                const runFailureEscalation = async (): Promise<boolean> => {
+                  const failAdapter = COMMUNICATION_CHASE_ADAPTERS.get(
+                    candidate.entityKind,
+                  );
+                  if (!failAdapter) return false;
                   const failStop = await failAdapter.checkStop({
                     tx,
                     ctx,
@@ -40443,61 +40452,83 @@ export async function executeCommunicationChasesForTenant(
                     store,
                     nowIso,
                   });
-                  if (!failStop.stop) {
-                    const failSpec = await failAdapter.escalationCandidates({
-                      tx,
-                      ctx,
-                      chase: failRes.chase,
-                      rule: effectiveChasing[failAdapter.ruleKey],
-                      subject: failStop.subject,
-                      people: staffPeople,
-                      teams,
-                      rbacConfig: effectiveRbac,
-                      nowIso,
-                    });
-                    const assignee = resolveEligibleChaseEscalationAssignee({
-                      orderedPersonIds: failSpec.orderedPersonIds,
-                      canPersonAccessSubject: failSpec.canPersonAccessSubject,
-                      people: staffPeople,
-                    });
-                    if (assignee) {
-                      const failTask =
-                        await createIdempotentChaseEscalationTaskInTx({
-                          ctx,
-                          chase: failRes.chase,
-                          assignee,
-                          escalationSpec: failSpec,
-                          escalationKey: `chase:${candidate.id}:failed_escalation`,
-                          title: failSpec.failureTaskTitle ?? failSpec.taskTitle,
-                          description:
-                            failSpec.failureTaskDescription ??
-                            failSpec.taskDescription,
-                          notificationDetail:
-                            'Communication chase failed 3 times',
-                          auditField: 'Chase failure escalation task',
-                          store,
-                          tenantConfig,
-                          actorId: options.triggeredById,
-                          nowIso,
-                        });
-                      if (failTask.created) {
-                        tasksCreatedCount += 1;
-                      }
-                    } else {
-                      await appendTenantAuditEntries(ctx, [
-                        buildZeroPiiChaseStepAuditEntry({
-                          tenantId: ctx.tenantId,
-                          chaseId: candidate.id,
-                          stepIndex,
-                          action: 'communication_chase.escalation_unassigned',
-                          field: 'Chase escalation unassigned',
-                          outcome: 'escalation_unassigned',
-                          actorId: options.triggeredById,
-                          at: nowIso,
-                        }),
-                      ]);
-                    }
+                  if (failStop.stop) return false;
+                  const failSpec = await failAdapter.escalationCandidates({
+                    tx,
+                    ctx,
+                    chase: failRes.chase,
+                    rule: effectiveChasing[failAdapter.ruleKey],
+                    subject: failStop.subject,
+                    people: staffPeople,
+                    teams,
+                    rbacConfig: effectiveRbac,
+                    nowIso,
+                  });
+                  const assignee = resolveEligibleChaseEscalationAssignee({
+                    orderedPersonIds: failSpec.orderedPersonIds,
+                    canPersonAccessSubject: failSpec.canPersonAccessSubject,
+                    people: staffPeople,
+                  });
+                  if (assignee) {
+                    const failTask =
+                      await createIdempotentChaseEscalationTaskInTx({
+                        ctx,
+                        chase: failRes.chase,
+                        assignee,
+                        escalationSpec: failSpec,
+                        escalationKey: `chase:${candidate.id}:failed_escalation`,
+                        title: failSpec.failureTaskTitle ?? failSpec.taskTitle,
+                        description:
+                          failSpec.failureTaskDescription ??
+                          failSpec.taskDescription,
+                        notificationDetail:
+                          'Communication chase failed 3 times',
+                        auditField: 'Chase failure escalation task',
+                        store,
+                        tenantConfig,
+                        actorId: options.triggeredById,
+                        nowIso,
+                      });
+                    return failTask.created;
                   }
+                  await appendTenantAuditEntries(ctx, [
+                    buildZeroPiiChaseStepAuditEntry({
+                      tenantId: ctx.tenantId,
+                      chaseId: candidate.id,
+                      stepIndex,
+                      action: 'communication_chase.escalation_unassigned',
+                      field: 'Chase escalation unassigned',
+                      outcome: 'escalation_unassigned',
+                      actorId: options.triggeredById,
+                      at: nowIso,
+                    }),
+                  ]);
+                  return false;
+                };
+                try {
+                  const createdFailTask = tx.withSavepoint
+                    ? await tx.withSavepoint(
+                        `sp_chase_fail_esc_${candidateIdx}`,
+                        runFailureEscalation,
+                      )
+                    : await runFailureEscalation();
+                  if (createdFailTask) {
+                    tasksCreatedCount += 1;
+                  }
+                } catch (escErr) {
+                  const escErrorCode = sanitizeJobErrorCode(escErr);
+                  await appendTenantAuditEntries(ctx, [
+                    buildZeroPiiChaseStepAuditEntry({
+                      tenantId: ctx.tenantId,
+                      chaseId: candidate.id,
+                      stepIndex,
+                      action: 'communication_chase.failure_escalation_failed',
+                      field: 'Chase failure escalation failed',
+                      outcome: `failure_escalation_failed:${escErrorCode}`,
+                      actorId: options.triggeredById,
+                      at: nowIso,
+                    }),
+                  ]);
                 }
               }
               failedCount += 1;

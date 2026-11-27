@@ -16,6 +16,7 @@ import {
   TenantPartyRepository,
   TenantPostgresPoolManager,
   TenantTaskWorkflowRepository,
+  computeNextLocalDayRunTimeIso,
   createDirectMigrationClient,
   loadAndValidateTenantConfig,
   resolveTenantFromVerifiedToken,
@@ -1869,6 +1870,10 @@ describe('S1-06: Client Care dispatch, Monotonic B2, R817 purpose decoupling, R8
     // Install a temporary PostgreSQL BEFORE INSERT trigger on email_outbox that fails ONLY chase2 step 1
     const direct = await createDirectMigrationClient({ ctx });
     try {
+      await direct.query(
+        `DELETE FROM public.job_runs WHERE tenant_id = $1 AND job_key = 'communication-chases'`,
+        [ctx.tenantId],
+      );
       await direct.query(`
         CREATE OR REPLACE FUNCTION public.test_fail_r833_chase_fn()
         RETURNS trigger
@@ -1903,7 +1908,12 @@ describe('S1-06: Client Care dispatch, Monotonic B2, R817 purpose decoupling, R8
         expect(run1.jobRun.summary.scope).toBe('partial');
       }
 
-      // Chases 1 & 3 succeeded and committed; chase 2 rolled back cleanly and stayed on step 1
+      // R852: Chase 2 fails -> backed off to tomorrow 08:00 local; Chases 1 & 3 commit.
+      const expectedNextDay1 = computeNextLocalDayRunTimeIso(
+        day7Now,
+        chaseCfg.timeZone,
+        8,
+      );
       const c1After = await chasingRepo.getChaseById(ctx, chase1.id);
       const c2After1 = await chasingRepo.getChaseById(ctx, chase2.id);
       const c3After = await chasingRepo.getChaseById(ctx, chase3.id);
@@ -1913,34 +1923,66 @@ describe('S1-06: Client Care dispatch, Monotonic B2, R817 purpose decoupling, R8
       expect(c2After1?.nextStepIndex).toBe(1);
       expect(c2After1?.consecutiveFailureCount).toBe(1);
       expect(c2After1?.lastErrorCode).toBeTruthy();
+      expect(c2After1?.nextActionAt).toBeTruthy();
+      expect(new Date(c2After1!.nextActionAt!).getTime()).toBe(
+        new Date(expectedNextDay1).getTime(),
+      );
 
       const outboxAfter1 = await outboxRepo.listOutboxRecords(ctx, { limit: 100 });
       expect(outboxAfter1.some((r) => r.idempotencyKey === `chase:${chase1.id}:step:1`)).toBe(true);
       expect(outboxAfter1.some((r) => r.idempotencyKey === `chase:${chase3.id}:step:1`)).toBe(true);
       expect(outboxAfter1.some((r) => r.idempotencyKey === `chase:${chase2.id}:step:1`)).toBe(false);
 
-      // Scheduled retry on same day runs because scope === 'partial' -> strike 2, then strike 3 -> 'failed' + 1 task
+      // R852: Same-day scheduled retry (deferred hourly tick) does NOT retry failed chase 2
+      const sameDayRetry = await executeCommunicationChasesForTenant(ctx, {
+        triggerSource: 'scheduled',
+        triggeredById: 'system:communication-chases',
+        tenantConfig: chaseCfg,
+        drainAfterCommit: false,
+        now: new Date(day7Now.getTime() + 3_600_000),
+      });
+      expect(sameDayRetry.outcome).toBe('executed');
+      if (sameDayRetry.outcome === 'executed') {
+        expect(sameDayRetry.result.summary.dueEvaluated).toBe(0);
+        expect(sameDayRetry.result.summary.failedCount).toBe(0);
+      }
+      expect((await chasingRepo.getChaseById(ctx, chase2.id))?.consecutiveFailureCount).toBe(1);
+
+      // Day 2: 08:05 local -> strike 2, backed off to Day 3 08:00 local
+      const day2Now = new Date(new Date(expectedNextDay1).getTime() + 300_000);
+      const expectedNextDay2 = computeNextLocalDayRunTimeIso(
+        day2Now,
+        chaseCfg.timeZone,
+        8,
+      );
       const run2 = await executeCommunicationChasesForTenant(ctx, {
         triggerSource: 'scheduled',
         triggeredById: 'system:communication-chases',
         tenantConfig: chaseCfg,
         drainAfterCommit: false,
-        now: new Date(day7Now.getTime() + 60_000),
+        now: day2Now,
       });
       expect(run2.outcome).toBe('executed');
-      expect((await chasingRepo.getChaseById(ctx, chase2.id))?.consecutiveFailureCount).toBe(2);
+      const c2After2 = await chasingRepo.getChaseById(ctx, chase2.id);
+      expect(c2After2?.consecutiveFailureCount).toBe(2);
+      expect(new Date(c2After2!.nextActionAt!).getTime()).toBe(
+        new Date(expectedNextDay2).getTime(),
+      );
 
+      // Day 3: 08:05 local -> strike 3 -> 'failed' + 1 failure escalation task
+      const day3Now = new Date(new Date(expectedNextDay2).getTime() + 300_000);
       const run3 = await executeCommunicationChasesForTenant(ctx, {
         triggerSource: 'scheduled',
         triggeredById: 'system:communication-chases',
         tenantConfig: chaseCfg,
         drainAfterCommit: false,
-        now: new Date(day7Now.getTime() + 120_000),
+        now: day3Now,
       });
       expect(run3.outcome).toBe('executed');
       const c2Failed = await chasingRepo.getChaseById(ctx, chase2.id);
       expect(c2Failed?.status).toBe('failed');
       expect(c2Failed?.consecutiveFailureCount).toBe(3);
+      expect(c2Failed?.nextActionAt).toBeNull();
 
       const failTasks = await taskRepo.listTasksLinkedToRecord<Task>(ctx, 'matter', matterIds[1]!);
       const failureEscTasks = failTasks.filter((t) => t.systemKey === `chase:${chase2.id}:failed_escalation`);
@@ -1968,7 +2010,7 @@ describe('S1-06: Client Care dispatch, Monotonic B2, R817 purpose decoupling, R8
         triggeredById: 'system:communication-chases',
         tenantConfig: sendDisabledCfg,
         drainAfterCommit: false,
-        now: addDays(new Date(chase3.sentAt), 14),
+        now: addDays(new Date(chase3.sentAt), 15),
       });
 
       const jobRuns = await jobRunRepo.listJobRuns(ctx, { jobKey: 'communication-chases' });
@@ -3699,6 +3741,271 @@ describe('S1-06: Client Care dispatch, Monotonic B2, R817 purpose decoupling, R8
         }
       }
     } finally {
+      setTestActorSession(null);
+      setActiveTenantConfigForTesting(null);
+    }
+  }, 60_000);
+
+  it('14. R847: isolates third-strike failure escalation in its own savepoint without rolling back chase failure state or sibling chases', async () => {
+    await resetAllDemoData('P-000004', testDataResetContext());
+    const ctx = testTenantCtx('P-000001');
+    const chasingRepo = new TenantChasingRepository();
+    const outboxRepo = new TenantOutboxRepository();
+    const auditRepo = new TenantAuditRepository();
+
+    const chaseCfg = loadAndValidateTenantConfig(
+      notALawFirmBaseConfig as unknown as Record<string, unknown>,
+      {
+        tenantId: 'not-a-law-firm',
+        integrations: {
+          ...((notALawFirmBaseConfig as unknown as { integrations: Record<string, unknown> })
+            .integrations ?? {}),
+          email: { provider: 'disabled' },
+        },
+        chasing: {
+          engagementLetter: {
+            enabled: true,
+            sendEmails: true,
+            firstChaseDays: 7,
+            secondChaseDays: 14,
+            escalateTaskDays: 21,
+          },
+          quote: {
+            enabled: false,
+            sendEmails: false,
+            firstChaseDays: 7,
+            secondChaseDays: 14,
+            escalateTaskDays: 21,
+          },
+          moneyOnAccount: {
+            enabled: false,
+            sendEmails: false,
+            firstChaseDays: 7,
+            secondChaseDays: 14,
+            escalateTaskDays: 21,
+          },
+        },
+      },
+      'test',
+    );
+    const sendDisabledCfg = loadAndValidateTenantConfig(
+      notALawFirmBaseConfig as unknown as Record<string, unknown>,
+      {
+        tenantId: 'not-a-law-firm',
+        integrations: chaseCfg.integrations,
+        chasing: {
+          ...chaseCfg.chasing!,
+          engagementLetter: {
+            ...chaseCfg.chasing!.engagementLetter,
+            sendEmails: false,
+          },
+        },
+      },
+      'test',
+    );
+
+    const createAndSend = async (label: string) => {
+      let matterId = '';
+      let matterRef = '';
+      await runAsActionActor(
+        'P-000001',
+        async () => {
+          const mRes = await saveMatterRecord(
+            {
+              title: `R847 Failure Esc Matter ${label}`,
+              clientId: 'O-000001',
+              practiceAreaId: 'work_type.employment_and_hr',
+              workTypeSubcategoryId: 'work_type.employment_and_hr_tribunal_claims',
+              responsiblePartnerId: 'P-000001',
+              supervisingPartnerId: 'P-000001',
+              leadFeeEarnerId: 'P-000002',
+              teamMemberIds: ['P-000001', 'P-000002'],
+              conflictCheckRecord: makeConflictRecord('P-000001', `R847 ${label}`),
+              riskAssessment: { answers: BASE_LOW_RISK_ANSWERS },
+            },
+            { byId: 'P-000001', saveMode: 'submit_cleared' },
+          );
+          expect(mRes.errors).toBeUndefined();
+          matterId = mRes.matter!.id;
+          matterRef = mRes.matter!.matterNumber || mRes.matter!.id;
+        },
+        { roles: ['partner'], mfaVerified: false },
+      );
+
+      const sRes = await runAsActionActor(
+        'P-000001',
+        () =>
+          sendEngagementLetterRecord(
+            { matterId, recipientEmail: `r847-${label}@example.test` },
+            'P-000001',
+            { tenantConfig: chaseCfg, drainAfterCommit: false },
+          ),
+        { roles: ['partner'], mfaVerified: false },
+      );
+      expect(sRes.ok).toBe(true);
+      if (!sRes.ok || !sRes.chase) throw new Error('Expected chase');
+      return { matterId, matterRef, chase: sRes.chase };
+    };
+
+    const target = await createAndSend('Target');
+    const siblingDay21 = await createAndSend('SiblingDay21');
+
+    // Advance Target & SiblingDay21 cleanly past steps 1 & 2 so both are due on step 3
+    const day8 = addDays(new Date(target.chase.sentAt), 8);
+    await executeCommunicationChasesForTenant(ctx, {
+      triggerSource: 'manual',
+      triggeredById: 'system:communication-chases',
+      tenantConfig: sendDisabledCfg,
+      drainAfterCommit: false,
+      now: day8,
+    });
+    const day15 = addDays(new Date(target.chase.sentAt), 15);
+    await executeCommunicationChasesForTenant(ctx, {
+      triggerSource: 'manual',
+      triggeredById: 'system:communication-chases',
+      tenantConfig: sendDisabledCfg,
+      drainAfterCommit: false,
+      now: day15,
+    });
+    expect((await chasingRepo.getChaseById(ctx, target.chase.id))?.nextStepIndex).toBe(3);
+
+    // Install a PostgreSQL BEFORE INSERT trigger on public.tasks rejecting every escalation
+    // task insert for the Target matter (forcing BOTH normal step 3 AND 3rd-strike task creation to throw).
+    const direct = await createDirectMigrationClient({ ctx });
+    try {
+      await direct.query(
+        `DELETE FROM public.job_runs WHERE tenant_id = $1 AND job_key = 'communication-chases'`,
+        [ctx.tenantId],
+      );
+      await direct.query(`
+        CREATE OR REPLACE FUNCTION public.test_fail_r847_task_fn()
+        RETURNS trigger
+        LANGUAGE plpgsql
+        AS $$
+        BEGIN
+          IF NEW.auto_trigger = 'communication_chase_escalation'
+             AND position('${target.matterRef}' in NEW.title) > 0 THEN
+            RAISE EXCEPTION 'R847_SIMULATED_TASK_INSERT_FAILURE';
+          END IF;
+          RETURN NEW;
+        END;
+        $$;
+        DROP TRIGGER IF EXISTS trg_test_fail_r847_task ON public.tasks;
+        CREATE TRIGGER trg_test_fail_r847_task
+          BEFORE INSERT ON public.tasks
+          FOR EACH ROW EXECUTE FUNCTION public.test_fail_r847_task_fn();
+      `);
+
+      // Day 22 (strike 1): Target step 3 fails; SiblingDay21 step 3 escalation commits
+      const day22 = addDays(new Date(target.chase.sentAt), 22);
+      day22.setUTCHours(9, 0, 0, 0);
+      const run1 = await executeCommunicationChasesForTenant(ctx, {
+        triggerSource: 'scheduled',
+        triggeredById: 'system:communication-chases',
+        tenantConfig: chaseCfg,
+        drainAfterCommit: false,
+        now: day22,
+      });
+      expect(run1.outcome).toBe('executed');
+      if (run1.outcome === 'executed') {
+        expect(run1.result.summary.tasksCreatedCount).toBe(1);
+        expect(run1.result.summary.failedCount).toBe(1);
+      }
+      expect((await chasingRepo.getChaseById(ctx, siblingDay21.chase.id))?.status).toBe('completed');
+      expect((await chasingRepo.getChaseById(ctx, target.chase.id))?.consecutiveFailureCount).toBe(1);
+
+      // Day 23 (strike 2): fresh healthy sibling sends step 1 email and commits
+      const siblingDay23 = await createAndSend('SiblingDay23');
+      const nextDay2 = computeNextLocalDayRunTimeIso(day22, chaseCfg.timeZone, 8);
+      const day23 = new Date(new Date(nextDay2).getTime() + 300_000);
+      const run2 = await executeCommunicationChasesForTenant(ctx, {
+        triggerSource: 'scheduled',
+        triggeredById: 'system:communication-chases',
+        tenantConfig: chaseCfg,
+        drainAfterCommit: false,
+        now: day23,
+      });
+      expect(run2.outcome).toBe('executed');
+      if (run2.outcome === 'executed') {
+        expect(run2.result.summary.emailsQueuedCount).toBe(1);
+        expect(run2.result.summary.failedCount).toBe(1);
+      }
+      expect((await chasingRepo.getChaseById(ctx, siblingDay23.chase.id))?.nextStepIndex).toBe(2);
+      expect((await chasingRepo.getChaseById(ctx, target.chase.id))?.consecutiveFailureCount).toBe(2);
+      await runAsActionActor(
+        'P-000001',
+        () => stopCommunicationChaseAction({ chaseId: siblingDay23.chase.id }),
+        { roles: ['partner'], mfaVerified: false },
+      );
+
+      // Day 24 (strike 3): third-strike escalation throws inside sp_chase_fail_esc_*, rolls back
+      // only that savepoint, keeps status='failed' & count=3, logs failure_escalation_failed,
+      // and commits healthy siblingDay24!
+      const siblingDay24 = await createAndSend('SiblingDay24');
+      const nextDay3 = computeNextLocalDayRunTimeIso(day23, chaseCfg.timeZone, 8);
+      const day24 = new Date(new Date(nextDay3).getTime() + 300_000);
+      const run3 = await executeCommunicationChasesForTenant(ctx, {
+        triggerSource: 'scheduled',
+        triggeredById: 'system:communication-chases',
+        tenantConfig: chaseCfg,
+        drainAfterCommit: false,
+        now: day24,
+      });
+      expect(run3.outcome).toBe('executed');
+      if (run3.outcome === 'executed') {
+        expect(run3.result.summary.emailsQueuedCount).toBe(1);
+        expect(run3.result.summary.tasksCreatedCount).toBe(0);
+        expect(run3.result.summary.failedCount).toBe(1);
+      }
+
+      const targetFailed = await chasingRepo.getChaseById(ctx, target.chase.id);
+      expect(targetFailed?.status).toBe('failed');
+      expect(targetFailed?.consecutiveFailureCount).toBe(3);
+      expect(targetFailed?.nextActionAt).toBeNull();
+
+      const outbox = await outboxRepo.listOutboxRecords(ctx, { limit: 100 });
+      expect(
+        outbox.some((r) => r.idempotencyKey === `chase:${siblingDay24.chase.id}:step:1`),
+      ).toBe(true);
+      await runAsActionActor(
+        'P-000001',
+        () => stopCommunicationChaseAction({ chaseId: siblingDay24.chase.id }),
+        { roles: ['partner'], mfaVerified: false },
+      );
+
+      const audits = await auditRepo.listAuditEntriesForRecord(
+        ctx,
+        'communication_chase',
+        target.chase.id,
+        { limit: 100 },
+      );
+      const escFailAudits = audits.filter(
+        (a) => a.action === 'communication_chase.failure_escalation_failed',
+      );
+      expect(escFailAudits).toHaveLength(1);
+      expect(escFailAudits[0]?.newValue).toContain('failure_escalation_failed:');
+      expect(escFailAudits[0]?.newValue).not.toContain('r847-');
+
+      // Day 25: later run does NOT roll back and processes zero failed retries
+      const day25 = addDays(day24, 1);
+      const run4 = await executeCommunicationChasesForTenant(ctx, {
+        triggerSource: 'scheduled',
+        triggeredById: 'system:communication-chases',
+        tenantConfig: chaseCfg,
+        drainAfterCommit: false,
+        now: day25,
+      });
+      expect(run4.outcome).toBe('executed');
+      if (run4.outcome === 'executed') {
+        expect(run4.result.summary.failedCount).toBe(0);
+        expect(run4.result.summary.dueEvaluated).toBe(0);
+      }
+    } finally {
+      await direct.query(`
+        DROP TRIGGER IF EXISTS trg_test_fail_r847_task ON public.tasks;
+        DROP FUNCTION IF EXISTS public.test_fail_r847_task_fn();
+      `);
+      await direct.end();
       setTestActorSession(null);
       setActiveTenantConfigForTesting(null);
     }

@@ -454,16 +454,24 @@ export class TenantChasingRepository extends TenantScopedRepository {
     tx: TenantSqlClient,
     ctx: TenantContext,
     chaseId: string,
+    nowIso?: string,
   ): Promise<CommunicationChaseRecord | null> {
+    const params: unknown[] = [ctx.tenantId, chaseId];
+    const dueClause = nowIso
+      ? ` AND next_action_at IS NOT NULL AND next_action_at <= $3::timestamptz`
+      : '';
+    if (nowIso) {
+      params.push(nowIso);
+    }
     const res = await tx.query<DbCommunicationChaseRow>(
       `SELECT *
          FROM public.communication_chases
         WHERE tenant_id = $1
           AND id = $2
-          AND status = 'active'
+          AND status = 'active'${dueClause}
         LIMIT 1
         FOR UPDATE SKIP LOCKED`,
-      [ctx.tenantId, chaseId],
+      params,
     );
     const row = res.rows[0];
     if (!row) return null;
@@ -652,6 +660,7 @@ export class TenantChasingRepository extends TenantScopedRepository {
       readonly errorCode: string;
       readonly executedAt: string;
       readonly maxConsecutiveFailures?: number;
+      readonly retryNextActionAt?: string | null;
     },
   ): Promise<{
     readonly chase: CommunicationChaseRecord;
@@ -671,6 +680,7 @@ export class TenantChasingRepository extends TenantScopedRepository {
               END,
               next_action_at = CASE
                 WHEN consecutive_failure_count + 1 >= $4 THEN NULL
+                WHEN $6::timestamptz IS NOT NULL THEN $6::timestamptz
                 ELSE next_action_at
               END,
               updated_at = $5::timestamptz
@@ -678,7 +688,14 @@ export class TenantChasingRepository extends TenantScopedRepository {
           AND id = $2
           AND status = 'active'
         RETURNING *`,
-      [ctx.tenantId, params.chaseId, safeErrorCode, threshold, params.executedAt],
+      [
+        ctx.tenantId,
+        params.chaseId,
+        safeErrorCode,
+        threshold,
+        params.executedAt,
+        params.retryNextActionAt ?? null,
+      ],
     );
     const row = updRes.rows[0];
     if (!row) {

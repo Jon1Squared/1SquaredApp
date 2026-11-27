@@ -2,6 +2,7 @@ import { describe, expect, it } from 'vitest';
 import notALawFirmBaseConfig from '../../client-not-a-law-firm/config/base.json';
 import {
   CORE_API_VERSION,
+  computeNextLocalDayRunTimeIso,
   getEngagementStatusRank,
   isCoreApiRangeCompatible,
   isEngagementStatusRegression,
@@ -198,5 +199,29 @@ describe('S1-06: Communication Chasing & Engagement Config Schemas, Defaults & M
       code: 'ENGAGEMENT_DISPATCH_INVALID',
     });
     expect(sanitizePostgresError(allowedByCode, 'ctx')).toBe(allowedByCode);
+  });
+
+  it('8. R852: computeNextLocalDayRunTimeIso advances to next local day 08:00 across GMT, BST, and DST transitions', () => {
+    expect(
+      computeNextLocalDayRunTimeIso(
+        new Date('2026-11-27T09:15:00.000Z'),
+        'Europe/London',
+        8,
+      ),
+    ).toBe('2026-11-28T08:00:00.000Z');
+    expect(
+      computeNextLocalDayRunTimeIso(
+        new Date('2026-07-10T09:15:00.000Z'),
+        'Europe/London',
+        8,
+      ),
+    ).toBe('2026-07-11T07:00:00.000Z');
+    expect(
+      computeNextLocalDayRunTimeIso(
+        new Date('2026-03-28T09:15:00.000Z'),
+        'Europe/London',
+        8,
+      ),
+    ).toBe('2026-03-29T07:00:00.000Z');
   });
 });

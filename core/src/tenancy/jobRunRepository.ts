@@ -137,6 +137,53 @@ export function resolveTenantLocalDateAndHour(
   };
 }
 
+/**
+ * Computes the UTC ISO timestamp for tomorrow's run hour (`targetLocalHour:00:00`)
+ * in the tenant's IANA time zone (R852 failure backoff across GMT/BST & DST).
+ */
+export function computeNextLocalDayRunTimeIso(
+  now: Date = new Date(),
+  timeZone = 'Europe/London',
+  targetLocalHour = 8,
+): string {
+  const { localDate, timeZone: effectiveTimeZone } = resolveTenantLocalDateAndHour(
+    now,
+    timeZone,
+  );
+  const [yStr, mStr, dStr] = localDate.split('-');
+  const year = Number.parseInt(yStr ?? '1970', 10);
+  const month = Number.parseInt(mStr ?? '1', 10);
+  const day = Number.parseInt(dStr ?? '1', 10);
+  const clampedHour = Math.max(0, Math.min(23, Math.floor(targetLocalHour)));
+
+  const targetWallAsUtcMs = Date.UTC(year, month - 1, day + 1, clampedHour, 0, 0, 0);
+  const wallFormatter = new Intl.DateTimeFormat('en-GB', {
+    timeZone: effectiveTimeZone,
+    year: 'numeric',
+    month: '2-digit',
+    day: '2-digit',
+    hour: '2-digit',
+    minute: '2-digit',
+    hourCycle: 'h23',
+  });
+
+  let candidateMs = targetWallAsUtcMs;
+  for (let pass = 0; pass < 2; pass++) {
+    const parts = wallFormatter.formatToParts(new Date(candidateMs));
+    const oy = Number.parseInt(parts.find((p) => p.type === 'year')?.value ?? '1970', 10);
+    const om = Number.parseInt(parts.find((p) => p.type === 'month')?.value ?? '1', 10);
+    const od = Number.parseInt(parts.find((p) => p.type === 'day')?.value ?? '1', 10);
+    const ohRaw = Number.parseInt(parts.find((p) => p.type === 'hour')?.value ?? '0', 10);
+    const oh = Number.isFinite(ohRaw) ? ohRaw % 24 : 0;
+    const omin = Number.parseInt(parts.find((p) => p.type === 'minute')?.value ?? '0', 10);
+    const observedWallAsUtcMs = Date.UTC(oy, om - 1, od, oh, omin, 0, 0);
+    const offsetMs = observedWallAsUtcMs - candidateMs;
+    candidateMs = targetWallAsUtcMs - offsetMs;
+  }
+
+  return new Date(candidateMs).toISOString();
+}
+
 const ISO_WEEKDAY_BY_SHORT: Readonly<Record<string, 1 | 2 | 3 | 4 | 5 | 6 | 7>> =
   Object.freeze({
     mon: 1,
