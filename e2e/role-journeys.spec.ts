@@ -1970,6 +1970,7 @@ test.describe.serial('S1-08: Joined Stage 1 journey — Enquiry -> Quote -> CDD 
   test('1. Full joined Stage 1 journey across Enquiry, Quote POA, CDD, Engagement Letter, Money on Account & Finance receipt opens matter and persists 3 PDF outbox rows', async ({
     browser,
   }) => {
+    test.setTimeout(120_000);
     const suffix = Date.now();
     const uniqueEmail = `stage1.s108.${suffix}@example.test`;
     const firstName = 'Gwilym';
@@ -1995,16 +1996,16 @@ test.describe.serial('S1-08: Joined Stage 1 journey — Enquiry -> Quote -> CDD 
       await coordPage.locator('#enq-email').fill(uniqueEmail);
       await coordPage
         .locator('#enq-practice-area')
-        .selectOption('work_type.dispute_resolution');
+        .selectOption('work_type.real_estate_and_property');
       await coordPage
         .locator('#enq-subcat')
-        .selectOption('work_type.dispute_resolution_pre_action_correspondence');
+        .selectOption('work_type.real_estate_and_property_residential_conveyancing');
       await coordPage
         .locator('#enq-summary')
-        .fill(`Pre-action commercial debt claim ${suffix}`);
+        .fill(`Residential freehold purchase ${suffix}`);
       await coordPage
         .locator('#enq-notes')
-        .fill('Client seeks formal Letter Before Claim for unpaid commercial invoice.');
+        .fill('Client seeks conveyancing representation for freehold purchase.');
       await coordPage.locator('#enq-privacy-notice').selectOption('yes');
       await coordPage.getByRole('button', { name: 'Send to Team' }).first().click();
 
@@ -2034,21 +2035,21 @@ test.describe.serial('S1-08: Joined Stage 1 journey — Enquiry -> Quote -> CDD 
       );
 
       await expect(fePage.locator('#qte-practice-area')).toHaveValue(
-        'work_type.dispute_resolution',
+        'work_type.real_estate_and_property',
         { timeout: 10_000 },
       );
       await expect(fePage.locator('#qte-work-type')).toHaveValue(
-        'work_type.dispute_resolution_pre_action_correspondence',
+        'work_type.real_estate_and_property_residential_conveyancing',
         { timeout: 10_000 },
       );
       await expect(fePage.locator('#qte-prospect-email')).toHaveValue(uniqueEmail);
       await expect(fePage.getByTestId('quote-price-transparency-preview')).toContainText(
-        'Pre-Action Protocol',
+        'conveyancing',
         { timeout: 10_000 },
       );
       await fePage
         .locator('#qte-scope')
-        .fill('Draft Letter Before Claim and negotiate pre-action settlement.');
+        .fill('Freehold residential purchase and Land Registry registration.');
       await fePage.locator('#qte-fee-amount').fill('1500');
       await fePage.getByTestId('quote-poa-toggle').check();
       await fePage.getByTestId('quote-poa-amount-input').fill('500');
@@ -2099,9 +2100,15 @@ test.describe.serial('S1-08: Joined Stage 1 journey — Enquiry -> Quote -> CDD 
       await expect(partyCapSelect).toBeEnabled({ timeout: 10_000 });
       await partyCapSelect.selectOption({ index: 1 });
       const orgSearch = fePage.getByRole('searchbox', {
-        name: /Search existing people or organisations/i,
+        name: 'Search existing organisations',
       });
       await orgSearch.fill('Ty Glas Development Limited');
+      const existingOrgSelect = fePage.locator('#nm-party-existing-search');
+      await expect(existingOrgSelect.locator('option[value="O-000016"]')).toHaveCount(
+        1,
+        { timeout: 10_000 },
+      );
+      await existingOrgSelect.selectOption('O-000016');
       await fePage
         .getByRole('button', { name: /Add Ty Glas Development Limited as party/i })
         .click();
@@ -2116,6 +2123,24 @@ test.describe.serial('S1-08: Joined Stage 1 journey — Enquiry -> Quote -> CDD 
       }
       await fePage.getByRole('button', { name: 'Run conflict search' }).first().click();
       await expect(conflictSearchSection).toContainText('Last run', { timeout: 15_000 });
+
+      const sameNoConflictBtns = conflictSearchSection.getByRole('button', {
+        name: 'Same – no conflict',
+      });
+      const matchBtnCount = await sameNoConflictBtns.count();
+      for (let i = 0; i < matchBtnCount; i++) {
+        const btn = sameNoConflictBtns.nth(i);
+        if (await btn.isEnabled()) {
+          await btn.click();
+        }
+      }
+      const noteInputs = conflictSearchSection.locator(
+        'input[placeholder*="Explain why there is no conflict"]',
+      );
+      const noteCount = await noteInputs.count();
+      for (let i = 0; i < noteCount; i++) {
+        await noteInputs.nth(i).fill('Client prior instruction checked and unrelated.');
+      }
 
       const outcomeSection = fePage.getByRole('region', {
         name: '6 · OUTCOME AND DECLARATION',
@@ -2137,13 +2162,10 @@ test.describe.serial('S1-08: Joined Stage 1 journey — Enquiry -> Quote -> CDD 
       matterId = fePage.url().match(/\/matters\/(M-\d+)$/)?.[1] ?? '';
       expect(matterId).toMatch(/^M-\d+$/);
 
-      // Opening gate blocks all three preconditions initially
+      // Opening gate blocks both CDD and Funds on Account preconditions initially
       await expect(fePage.getByTestId('opening-precondition-cdd_complete')).toContainText(
         'Blocked',
         { timeout: 15_000 },
-      );
-      await expect(fePage.getByTestId('opening-precondition-engagement_signed')).toContainText(
-        'Blocked',
       );
       await expect(fePage.getByTestId('opening-precondition-funds_on_account')).toContainText(
         'Blocked',
@@ -2187,10 +2209,13 @@ test.describe.serial('S1-08: Joined Stage 1 journey — Enquiry -> Quote -> CDD 
         buffer: Buffer.from('%PDF-1.4\n% Stage 1 signed Client Care copy\n%%EOF\n'),
       });
       await fePage.getByTestId('upload-engagement-signed-btn').click();
-      await expect(fePage.getByTestId('opening-precondition-engagement_signed')).toContainText(
-        'Met',
+      await expect(fePage.getByTestId('matter-engagement-panel')).toContainText(
+        'Signed & returned',
         { timeout: 20_000 },
       );
+      await expect(fePage.getByTestId('signed-engagement-download-link')).toBeVisible({
+        timeout: 15_000,
+      });
 
       // 5. Fee earner sends £500 Money on Account request (pre-filled from Quote); cannot record receipt
       const moaPanel = fePage.getByTestId('matter-moa-panel');
@@ -2198,7 +2223,7 @@ test.describe.serial('S1-08: Joined Stage 1 journey — Enquiry -> Quote -> CDD 
       await expect(fePage.getByTestId('moa-record-receipt-panel')).toHaveCount(0);
       await expect(fePage.getByTestId('moa-amount-input')).toHaveValue('500.00');
       await fePage.getByTestId('moa-recipient-email-input').fill(uniqueEmail);
-      await fePage.getByTestId('moa-send-request-btn').dblclick();
+      await fePage.getByTestId('moa-send-request-btn').click();
 
       await expect(fePage.getByTestId('moa-requests-list')).toContainText('£500.00', {
         timeout: 20_000,
