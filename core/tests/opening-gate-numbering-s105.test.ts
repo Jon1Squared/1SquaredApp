@@ -3384,8 +3384,12 @@ describe('S1-05 (ADRs 0039 & 0040): High-risk opening sign-off, transactional wo
 
     // (e) & (f) Legacy Active + Pending matter shows "CMI incomplete" and is returned by cmi_incomplete filter,
     // while gate-opened and Prospective matters are excluded.
+    const activeStatusIds = statusValues
+      .filter((v) => v.listKey === 'matter_status' && v.systemKey === 'active')
+      .map((v) => v.id);
     const legacyPendingMatter = await matterRepo.getMatterById<Matter>(ctx, 'M-000002', {
       includeRestricted: true,
+      activeStatusIds,
     });
     expect(legacyPendingMatter).not.toBeNull();
     expect(legacyPendingMatter!.matterStatusId).toBe('matter_status.active');
