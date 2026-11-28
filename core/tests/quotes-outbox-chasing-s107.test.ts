@@ -1439,6 +1439,8 @@ describe('S1-07: Quote PDFs, outbox dispatch across send flows, POA, Price Trans
       { roles: ['fee_earner'], mfaVerified: false },
     );
 
+    // R855 + R877: Send/edit refusals across all terminal & converted states with per-state messages;
+    // revise refused only for Accepted, Converted & Superseded (Declined & Expired CAN be revised & sent).
     for (const [label, qId, expectedStatus] of [
       ['Accepted', accQuoteId, 'Accepted'],
       ['Declined', decQuoteId, 'Declined'],
@@ -1449,6 +1451,16 @@ describe('S1-07: Quote PDFs, outbox dispatch across send flows, POA, Price Trans
       const outboxBefore = (await outboxRepo.listOutboxRecords(ctx, { limit: 200 })).filter(
         (r) => r.quoteId === qId,
       ).length;
+
+      const plainEditRes = await runAsActionActor(
+        'P-000002',
+        () =>
+          saveQuoteAction(baseQuoteInput(`BlockedPlain${label}`), {
+            id: qId,
+          }),
+        { roles: ['fee_earner'], mfaVerified: false },
+      );
+      expect(plainEditRes.code, `${label} plain edit`).toBe('VALIDATION_ERROR');
 
       const emailSaveRes = await runAsActionActor(
         'P-000002',
@@ -1475,17 +1487,92 @@ describe('S1-07: Quote PDFs, outbox dispatch across send flows, POA, Price Trans
       );
       expect(offlineSaveRes.code, `${label} save offline`).toBe('VALIDATION_ERROR');
 
-      const revRes = await runAsActionActor(
+      const directEmailRes = await runAsActionActor(
         'P-000002',
         () =>
-          reviseQuoteAction(qId, {
-            feeBasis: 'Fixed fee',
-            feeAmountExVat: 9999,
-            scope: 'Blocked revise',
+          sendQuoteEmailAction({
+            quoteId: qId,
+            idempotencyKey: `r877-blk-direct-${label}`,
           }),
         { roles: ['fee_earner'], mfaVerified: false },
       );
-      expect(revRes.code, `${label} revise`).toBe('VALIDATION_ERROR');
+      expect(directEmailRes.ok, `${label} direct email send`).toBe(false);
+      if (!directEmailRes.ok && !isActionDenied(directEmailRes)) {
+        expect(directEmailRes.code, `${label} direct email code`).toBe('VALIDATION_ERROR');
+      }
+
+      const directOfflineRes = await runAsActionActor(
+        'P-000002',
+        () => markQuoteSentOfflineAction({ quoteId: qId }),
+        { roles: ['fee_earner'], mfaVerified: false },
+      );
+      expect(directOfflineRes.ok, `${label} direct offline send`).toBe(false);
+      if (!directOfflineRes.ok && !isActionDenied(directOfflineRes)) {
+        expect(directOfflineRes.code, `${label} direct offline code`).toBe('VALIDATION_ERROR');
+      }
+
+      const directEmailErr = !directEmailRes.ok ? directEmailRes.error : '';
+      const directOfflineErr = !directOfflineRes.ok ? directOfflineRes.error : '';
+      if (label === 'Accepted' || label === 'Converted') {
+        for (const msg of [
+          plainEditRes.error,
+          emailSaveRes.error,
+          offlineSaveRes.error,
+          directEmailErr,
+          directOfflineErr,
+        ]) {
+          expect(msg, `${label} accepted refusal msg`).toBe(
+            'This quote has been accepted and cannot be changed or sent again.',
+          );
+        }
+      } else if (label === 'Superseded') {
+        for (const msg of [
+          plainEditRes.error,
+          emailSaveRes.error,
+          offlineSaveRes.error,
+          directEmailErr,
+          directOfflineErr,
+        ]) {
+          expect(msg?.toLowerCase(), `${label} superseded msg`).toContain('superseded');
+          expect(msg, `${label} must not tell user to revise`).not.toContain('Revise the quote');
+        }
+      } else {
+        expect(plainEditRes.error).toContain('cannot be edited');
+        expect(plainEditRes.error).toContain('Revise the quote to create a new version first.');
+        for (const msg of [
+          emailSaveRes.error,
+          offlineSaveRes.error,
+          directEmailErr,
+          directOfflineErr,
+        ]) {
+          expect(msg, `${label} send msg`).toContain('cannot be sent');
+          expect(msg, `${label} send revise hint`).toContain(
+            'Revise the quote to create a new version first.',
+          );
+        }
+      }
+
+      if (label === 'Accepted' || label === 'Superseded' || label === 'Converted') {
+        const revRes = await runAsActionActor(
+          'P-000002',
+          () =>
+            reviseQuoteAction(qId, {
+              feeBasis: 'Fixed fee',
+              feeAmountExVat: 9999,
+              scope: 'Blocked revise',
+            }),
+          { roles: ['fee_earner'], mfaVerified: false },
+        );
+        expect(revRes.code, `${label} revise`).toBe('VALIDATION_ERROR');
+        if (label === 'Accepted' || label === 'Converted') {
+          expect(revRes.error).toBe(
+            'This quote has been accepted and cannot be changed or sent again.',
+          );
+        } else {
+          expect(revRes.error?.toLowerCase()).toContain('superseded');
+          expect(revRes.error).not.toContain('Revise the quote');
+        }
+      }
 
       const afterQ = (await intakeRepo.getQuoteById<Quote>(ctx, qId))!;
       expect(afterQ.status).toBe(expectedStatus);
@@ -1499,6 +1586,73 @@ describe('S1-07: Quote PDFs, outbox dispatch across send flows, POA, Price Trans
           entityId: qId,
         }),
       ).toBeNull();
+    }
+
+    // R877: Declined -> revise -> v2 -> send succeeds
+    const decRevRes = await runAsActionActor(
+      'P-000002',
+      () =>
+        reviseQuoteAction(decQuoteId, {
+          feeBasis: 'Fixed fee',
+          feeAmountExVat: 1100,
+          scope: 'Revised Declined quote v2',
+          revisionNote: 'Reduced fee after client feedback',
+        }),
+      { roles: ['fee_earner'], mfaVerified: false },
+    );
+    expect(decRevRes.quote).not.toBeNull();
+    expect(decRevRes.quote?.version).toBe(2);
+    expect(decRevRes.quote?.status).toBe('Draft');
+    expect(decRevRes.quote?.declineReason).toBeNull();
+    expect(decRevRes.quote?.versionHistory).toHaveLength(1);
+    const decSendV2 = await runAsActionActor(
+      'P-000002',
+      () =>
+        sendQuoteEmailAction({
+          quoteId: decQuoteId,
+          idempotencyKey: 'r877-dec-v2-send',
+        }),
+      { roles: ['fee_earner'], mfaVerified: false },
+    );
+    expect(decSendV2.ok).toBe(true);
+    if (decSendV2.ok) {
+      expect(decSendV2.quote.version).toBe(2);
+      expect(decSendV2.quote.status).toBe('Sent');
+      expect(decSendV2.outboxRecord.quoteId).toBe(decQuoteId);
+      expect(decSendV2.chase?.status).toBe('active');
+    }
+
+    // R877: Expired -> revise -> v2 (fresh validUntil) -> send succeeds
+    const expRevRes = await runAsActionActor(
+      'P-000002',
+      () =>
+        reviseQuoteAction(expQuoteId, {
+          feeBasis: 'Fixed fee',
+          feeAmountExVat: 1300,
+          scope: 'Revised Expired quote v2',
+          revisionNote: 'Renewed quote validity window',
+        }),
+      { roles: ['fee_earner'], mfaVerified: false },
+    );
+    expect(expRevRes.quote).not.toBeNull();
+    expect(expRevRes.quote?.version).toBe(2);
+    expect(expRevRes.quote?.status).toBe('Draft');
+    expect(expRevRes.quote!.validUntil > '2026-01-10').toBe(true);
+    const expSendV2 = await runAsActionActor(
+      'P-000002',
+      () =>
+        sendQuoteEmailAction({
+          quoteId: expQuoteId,
+          idempotencyKey: 'r877-exp-v2-send',
+        }),
+      { roles: ['fee_earner'], mfaVerified: false },
+    );
+    expect(expSendV2.ok).toBe(true);
+    if (expSendV2.ok) {
+      expect(expSendV2.quote.version).toBe(2);
+      expect(expSendV2.quote.status).toBe('Sent');
+      expect(expSendV2.outboxRecord.quoteId).toBe(expQuoteId);
+      expect(expSendV2.chase?.status).toBe('active');
     }
 
     // R855 version/updatedAt conflict on concurrent reviseQuoteAction calls

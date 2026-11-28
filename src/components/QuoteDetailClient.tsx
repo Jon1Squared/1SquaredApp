@@ -106,7 +106,12 @@ export function QuoteDetailClient({
   const now = useMemo(() => new Date(), []);
 
   const [viewMode, setViewMode] = useState<'detail' | 'edit' | 'revise'>(() =>
-    initialAction === 'revise' ? 'revise' : 'detail',
+    initialAction === 'revise' &&
+    quote.status !== 'Accepted' &&
+    quote.status !== 'Superseded' &&
+    !quote.convertedMatterId
+      ? 'revise'
+      : 'detail',
   );
   const [followUpModalOpen, setFollowUpModalOpen] = useState(false);
   const [outcomeModalOpen, setOutcomeModalOpen] = useState(false);
@@ -210,6 +215,11 @@ export function QuoteDetailClient({
   const convertedMatter = quote.convertedMatterId
     ? matters.find((m) => m.id === quote.convertedMatterId) ?? null
     : null;
+  const canReviseQuote =
+    !quote.convertedMatterId &&
+    !convertedMatter &&
+    effectiveStatus !== 'Accepted' &&
+    effectiveStatus !== 'Superseded';
 
   const quoteVatRatePercent = quote.vatRatePercent ?? 20;
 
@@ -522,7 +532,7 @@ export function QuoteDetailClient({
               >
                 Record outcome
               </button>
-              {!convertedMatter ? (
+              {canReviseQuote ? (
                 <button
                   type="button"
                   className="btn btn--secondary"
@@ -562,6 +572,17 @@ export function QuoteDetailClient({
           effectiveStatus === 'Expired' ||
           effectiveStatus === 'Superseded' ? (
             <>
+              {canReviseQuote &&
+              (effectiveStatus === 'Declined' || effectiveStatus === 'Expired') ? (
+                <button
+                  type="button"
+                  className="btn btn--primary"
+                  disabled={pending}
+                  onClick={() => setViewMode('revise')}
+                >
+                  Revise quote (create v{quote.version + 1})
+                </button>
+              ) : null}
               <button
                 type="button"
                 className="btn btn--secondary"
@@ -641,13 +662,15 @@ export function QuoteDetailClient({
             passed without an outcome. You can revise the quote to issue a new version (v
             {quote.version + 1}) or record a late outcome.
           </div>
-          <button
-            type="button"
-            className="btn btn--secondary btn--sm"
-            onClick={() => setViewMode('revise')}
-          >
-            Revise quote →
-          </button>
+          {canReviseQuote ? (
+            <button
+              type="button"
+              className="btn btn--secondary btn--sm"
+              onClick={() => setViewMode('revise')}
+            >
+              Revise quote →
+            </button>
+          ) : null}
         </div>
       ) : null}
 

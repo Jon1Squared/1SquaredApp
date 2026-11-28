@@ -6,7 +6,7 @@ export const quotesAndPricingArticle: DocArticle = {
   section: 'enquiries',
   summary:
     'How to include Price Transparency wording and an upfront Payment on Account on quotes, download or email quote PDFs, record quotes sent offline, and manage automated quote follow-ups.',
-  updated: '2026-11-27',
+  updated: '2026-11-28',
   body: `
 This guide explains how **fee quotes**, **Price Transparency disclosures**, **Payment on Account requests**, **quote PDFs**, and **automated quote follow-ups** work from initial draft through to matter conversion.
 
@@ -18,13 +18,20 @@ If your firm has turned on Price Transparency disclosures, administrators with m
 2. Select any practice area or individual work type to override specific sections where specialist guidance applies. Badges next to each field show whether wording comes from the work type, the parent practice area, or the firm default, and **Use inherited** clears a field override back to the inherited wording.
 3. When a quote is sent, its Price Transparency wording (together with any matter-specific note added by the fee earner) is frozen onto that quote version so later administration updates never rewrite historical quotes sent to clients.
 
-## 2. Creating a quote with Payment on Account and disclosures
+## 2. Creating, editing and revising quotes with Payment on Account and disclosures
 
 When creating or revising a quote from **New Quote** or **Revise quote**:
 
 1. Complete the client or prospect details, work type, scope, professional fees, and any disbursements. If you plan to send the quote by email, include a valid email address for the client or prospect.
 2. Tick **Request a Payment on Account before work begins** and enter the amount required on instruction if your firm needs funds on account before opening the matter.
 3. Review the **Price Transparency disclosures** preview drawn automatically from your firm’s settings for the chosen work type, and add an optional **matter-specific pricing note** if extra context should appear on the quote PDF.
+
+Which quotes can be edited, revised, or sent depends on the quote’s stage:
+
+- **Draft quotes** can be edited directly, emailed to the client or prospect, or recorded as sent offline.
+- **Sent and follow-up-due quotes** can be re-sent by email or revised into a new version.
+- **Declined and expired quotes** cannot be edited or sent directly, but they can be revised into a fresh draft version (superseding the previous version) with an updated scope, fees, and validity date, and that new version can then be sent.
+- **Accepted, converted, and superseded quotes** are locked and cannot be edited, revised, or sent again.
 
 ## 3. Downloading, emailing, or recording a quote as sent offline
 

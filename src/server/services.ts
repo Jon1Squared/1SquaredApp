@@ -21444,6 +21444,35 @@ const QUOTE_TERMINAL_STATUSES = new Set<QuoteStatus>([
   'Superseded',
 ]);
 
+const QUOTE_NON_REVISABLE_STATUSES = new Set<QuoteStatus>([
+  'Accepted',
+  'Superseded',
+]);
+
+function quoteTerminalRefusalMessage(params: {
+  readonly reference: string;
+  readonly status: QuoteStatus;
+  readonly effectiveStatus: QuoteStatus;
+  readonly convertedMatterId?: string | null;
+  readonly action: 'send' | 'edit' | 'revise';
+}): string {
+  const { reference, status, effectiveStatus, convertedMatterId, action } = params;
+  if (
+    Boolean(convertedMatterId) ||
+    status === 'Accepted' ||
+    effectiveStatus === 'Accepted'
+  ) {
+    return 'This quote has been accepted and cannot be changed or sent again.';
+  }
+  if (status === 'Superseded' || effectiveStatus === 'Superseded') {
+    return action === 'revise'
+      ? `Quote ${reference} has been superseded by a newer version and cannot be revised.`
+      : `Quote ${reference} has been superseded by a newer version and cannot be changed or sent.`;
+  }
+  const verb = action === 'edit' ? 'edited' : 'sent';
+  return `Quote ${reference} cannot be ${verb} because its status is ${effectiveStatus}. Revise the quote to create a new version first.`;
+}
+
 async function enqueueQuoteOutboxAndChaseInTx(params: {
   readonly tx: TenantSqlClient;
   readonly ctx: TenantContext;
@@ -21789,9 +21818,13 @@ export async function sendQuoteEmailRecord(
     ) {
       return registerServiceFailure(
         'VALIDATION_ERROR',
-        quotePre.convertedMatterId
-          ? `Quote ${quotePre.reference} has already been converted to a matter and cannot be sent.`
-          : `Quote ${quotePre.reference} cannot be sent because its status is ${effectiveStatus}. Revise the quote to create a new version first.`,
+        quoteTerminalRefusalMessage({
+          reference: quotePre.reference,
+          status: quotePre.status,
+          effectiveStatus,
+          convertedMatterId: quotePre.convertedMatterId,
+          action: 'send',
+        }),
       );
     }
 
@@ -21975,9 +22008,13 @@ export async function sendQuoteEmailRecord(
       ) {
         return registerServiceFailure(
           'VALIDATION_ERROR',
-          lockedQuote.convertedMatterId
-            ? `Quote ${lockedQuote.reference} has already been converted to a matter and cannot be sent.`
-            : `Quote ${lockedQuote.reference} cannot be sent because its status is ${lockedEffective}. Revise the quote to create a new version first.`,
+          quoteTerminalRefusalMessage({
+            reference: lockedQuote.reference,
+            status: lockedQuote.status,
+            effectiveStatus: lockedEffective,
+            convertedMatterId: lockedQuote.convertedMatterId,
+            action: 'send',
+          }),
         );
       }
       if (
@@ -22162,9 +22199,13 @@ export async function markQuoteSentOfflineRecord(
       ) {
         return registerServiceFailure(
           'VALIDATION_ERROR',
-          lockedQuote.convertedMatterId
-            ? `Quote ${lockedQuote.reference} has already been converted to a matter and cannot be marked as sent.`
-            : `Quote ${lockedQuote.reference} cannot be marked as sent because its status is ${effectiveStatus}.`,
+          quoteTerminalRefusalMessage({
+            reference: lockedQuote.reference,
+            status: lockedQuote.status,
+            effectiveStatus,
+            convertedMatterId: lockedQuote.convertedMatterId,
+            action: 'send',
+          }),
         );
       }
 
@@ -22443,9 +22484,13 @@ export async function saveQuoteRecord(
     ) {
       return {
         code: 'VALIDATION_ERROR',
-        error: existing.convertedMatterId
-          ? `Quote ${existing.reference} cannot be edited or sent because it has already been converted to a matter.`
-          : `Quote ${existing.reference} cannot be sent because its status is ${effectivePre}. Revise the quote to create a new version first.`,
+        error: quoteTerminalRefusalMessage({
+          reference: existing.reference,
+          status: existing.status,
+          effectiveStatus: effectivePre,
+          convertedMatterId: existing.convertedMatterId,
+          action: opts.markAsSent ? 'send' : 'edit',
+        }),
       };
     }
   }
@@ -23288,9 +23333,13 @@ export async function saveQuoteRecord(
     ) {
       return {
         code: 'VALIDATION_ERROR' as const,
-        error: lockedExisting.convertedMatterId
-          ? `Quote ${lockedExisting.reference} cannot be edited or sent because it has already been converted to a matter.`
-          : `Quote ${lockedExisting.reference} cannot be sent because its status is ${lockedEffective}. Revise the quote to create a new version first.`,
+        error: quoteTerminalRefusalMessage({
+          reference: lockedExisting.reference,
+          status: lockedExisting.status,
+          effectiveStatus: lockedEffective,
+          convertedMatterId: lockedExisting.convertedMatterId,
+          action: opts.markAsSent ? 'send' : 'edit',
+        }),
       };
     }
     if (
@@ -23800,15 +23849,19 @@ export async function reviseQuoteRecord(
   const nowIso = now.toISOString();
   const effectivePre = evaluateQuoteEffectiveStatus(quote, now);
   if (
-    QUOTE_TERMINAL_STATUSES.has(quote.status) ||
-    QUOTE_TERMINAL_STATUSES.has(effectivePre) ||
+    QUOTE_NON_REVISABLE_STATUSES.has(quote.status) ||
+    QUOTE_NON_REVISABLE_STATUSES.has(effectivePre) ||
     Boolean(quote.convertedMatterId)
   ) {
     return {
       code: 'VALIDATION_ERROR',
-      error: quote.convertedMatterId
-        ? `Quote ${quote.reference} cannot be revised because it has already been converted to a matter.`
-        : `Quote ${quote.reference} cannot be revised because its status is ${effectivePre}.`,
+      error: quoteTerminalRefusalMessage({
+        reference: quote.reference,
+        status: quote.status,
+        effectiveStatus: effectivePre,
+        convertedMatterId: quote.convertedMatterId,
+        action: 'revise',
+      }),
     };
   }
 
@@ -24176,15 +24229,19 @@ export async function reviseQuoteRecord(
 
     const lockedEffective = evaluateQuoteEffectiveStatus(lockedQuote, now);
     if (
-      QUOTE_TERMINAL_STATUSES.has(lockedQuote.status) ||
-      QUOTE_TERMINAL_STATUSES.has(lockedEffective) ||
+      QUOTE_NON_REVISABLE_STATUSES.has(lockedQuote.status) ||
+      QUOTE_NON_REVISABLE_STATUSES.has(lockedEffective) ||
       Boolean(lockedQuote.convertedMatterId)
     ) {
       return {
         code: 'VALIDATION_ERROR' as const,
-        error: lockedQuote.convertedMatterId
-          ? `Quote ${lockedQuote.reference} cannot be revised because it has already been converted to a matter.`
-          : `Quote ${lockedQuote.reference} cannot be revised because its status is ${lockedEffective}.`,
+        error: quoteTerminalRefusalMessage({
+          reference: lockedQuote.reference,
+          status: lockedQuote.status,
+          effectiveStatus: lockedEffective,
+          convertedMatterId: lockedQuote.convertedMatterId,
+          action: 'revise',
+        }),
       };
     }
     if (
