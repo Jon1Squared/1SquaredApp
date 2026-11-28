@@ -9,8 +9,14 @@ import {
   parsePmsWorkbookDataset,
   resolveWorkbookPath,
 } from './importPms';
+import {
+  minorUnitsToPounds,
+  poundsToMinorUnits,
+  sumMinorUnits,
+  type MinorUnits,
+} from '@platform/core-api';
 import { getTenantPmsSource } from './pmsSource';
-import { openXlsxWorkbook, parseMoney } from './xlsxReader';
+import { openXlsxWorkbook, parseMoney, parseMoneyPence } from './xlsxReader';
 
 describe('PMS Demo Database Import & Derived Views vs check_ sheets', () => {
   beforeAll(async () => {
@@ -72,9 +78,17 @@ describe('PMS Demo Database Import & Derived Views vs check_ sheets', () => {
     }
 
     // Check grand totals across all matters (Row 25 of check_matters)
-    const totalWip = parseMoney(matters.reduce((s, m) => s + m.unbilled_wip, 0));
-    const totalOutstanding = parseMoney(matters.reduce((s, m) => s + m.outstanding_debt, 0));
-    const totalClientAccount = parseMoney(matters.reduce((s, m) => s + m.client_account_balance, 0));
+    const totalWip = minorUnitsToPounds(
+      sumMinorUnits(matters.map((m) => poundsToMinorUnits(m.unbilled_wip))),
+    );
+    const totalOutstanding = minorUnitsToPounds(
+      sumMinorUnits(matters.map((m) => poundsToMinorUnits(m.outstanding_debt))),
+    );
+    const totalClientAccount = minorUnitsToPounds(
+      sumMinorUnits(
+        matters.map((m) => poundsToMinorUnits(m.client_account_balance)),
+      ),
+    );
 
     expect(totalWip).toBe(34140.0);
     expect(totalOutstanding).toBe(49130.22);
@@ -230,6 +244,7 @@ describe('PMS Demo Database Import & Derived Views vs check_ sheets', () => {
       due_date: '2026-12-05',
       invoice_type: 'Interim',
       fees_net: 2500,
+      fees_net_pence: 250000 as MinorUnits,
       exported_status: 'Posted',
     };
     const novPayment = {
@@ -240,6 +255,7 @@ describe('PMS Demo Database Import & Derived Views vs check_ sheets', () => {
       client_code: 'PEN001',
       receipt_date: '2026-11-07',
       amount: 3000,
+      amount_pence: 300000 as MinorUnits,
     };
     const novTimeEntry = {
       ...baseTimeEntries[0]!,
@@ -249,6 +265,7 @@ describe('PMS Demo Database Import & Derived Views vs check_ sheets', () => {
       date: '2026-11-09',
       hours: 3.5,
       value: 752.5,
+      value_pence: 75250 as MinorUnits,
       chargeable: 'Y' as const,
       billed_status: 'Unbilled' as const,
     };
@@ -302,9 +319,13 @@ describe('PMS Demo Database Import & Derived Views vs check_ sheets', () => {
       due_date: '2025-11-12',
       invoice_type: 'Interim',
       fees_net: 9000,
+      fees_net_pence: 900000 as MinorUnits,
       total: 10800,
+      total_pence: 1080000 as MinorUnits,
       paid: 10800,
+      paid_pence: 1080000 as MinorUnits,
       outstanding: 0,
+      outstanding_pence: 0 as MinorUnits,
       exported_status: 'Posted',
     };
     const invFuture2026 = {
@@ -316,9 +337,13 @@ describe('PMS Demo Database Import & Derived Views vs check_ sheets', () => {
       due_date: '2027-01-15',
       invoice_type: 'Interim',
       fees_net: 6400,
+      fees_net_pence: 640000 as MinorUnits,
       total: 7680,
+      total_pence: 768000 as MinorUnits,
       paid: 0,
+      paid_pence: 0 as MinorUnits,
       outstanding: 7680,
+      outstanding_pence: 768000 as MinorUnits,
       exported_status: 'Posted',
     };
     const te2025 = {
@@ -329,10 +354,13 @@ describe('PMS Demo Database Import & Derived Views vs check_ sheets', () => {
       date: '2025-10-12',
       hours: 12.0,
       value: 2580,
+      value_pence: 258000 as MinorUnits,
       chargeable: 'Y' as const,
       billed_status: 'Billed' as const,
       billed_value: 2580,
+      billed_value_pence: 258000 as MinorUnits,
       write_off_value: 350,
+      write_off_value_pence: 35000 as MinorUnits,
     };
     const teFuture2026 = {
       ...baseTimeEntries[0]!,
@@ -342,10 +370,13 @@ describe('PMS Demo Database Import & Derived Views vs check_ sheets', () => {
       date: '2026-12-15',
       hours: 8.0,
       value: 1720,
+      value_pence: 172000 as MinorUnits,
       chargeable: 'Y' as const,
       billed_status: 'Billed' as const,
       billed_value: 1720,
+      billed_value_pence: 172000 as MinorUnits,
       write_off_value: 200,
+      write_off_value_pence: 20000 as MinorUnits,
     };
     const withPriorAndFuture = buildFirmFinanceRollups({
       asAtDate: source.getExtractInfo().asAtDate,
@@ -921,6 +952,96 @@ describe('PMS Demo Database Import & Derived Views vs check_ sheets', () => {
       }
     }
     expect(matchedSeedPhones.length).toBeGreaterThan(20);
+  });
+
+  it('S1-12: parseMoneyPence parses canonical decimal text without float drift and round-trips half-penny ties away from zero', () => {
+    expect(parseMoneyPence('19.995')).toBe(2000);
+    expect(parseMoneyPence('-19.995')).toBe(-2000);
+    expect(parseMoneyPence('-0.005')).toBe(-1);
+    expect(parseMoneyPence('0.005')).toBe(1);
+    expect(parseMoneyPence('123456.78')).toBe(12345678);
+    expect(parseMoneyPence('1.4210854715202004e-14')).toBe(0);
+    expect(parseMoneyPence('')).toBe(0);
+    expect(parseMoneyPence(null)).toBe(0);
+    expect(
+      minorUnitsToPounds(
+        sumMinorUnits([parseMoneyPence('0.1'), parseMoneyPence('0.2')]),
+      ),
+    ).toBe(0.3);
+  });
+
+  it('R829: buildFirmFinanceRollups and buildClientFinancialsFromRows sum *_pence directly without pounds-to-pence round trips', async () => {
+    const { buildFirmFinanceRollups } = await import('@/domain/pms');
+    const source = await getTenantPmsSource(testDataResetContext());
+    const matterFins = source.getAllMatterFinancials();
+    const invBalances = source.listAllInvoiceBalances();
+    const timeEntries = source.listAllTimeEntries();
+    const payments = source.listAllPayments();
+    const clients = source.listClients();
+    const feeEarners = source.listFeeEarners();
+
+    // Verify importer and PG reads populated *_pence fields directly
+    expect(matterFins[0]?.unbilled_wip_pence).toBeTypeOf('number');
+    expect(invBalances[0]?.outstanding_pence).toBeTypeOf('number');
+    expect(timeEntries[0]?.value_pence).toBeTypeOf('number');
+    expect(payments[0]?.amount_pence).toBeTypeOf('number');
+
+    const rollups = buildFirmFinanceRollups({
+      asAtDate: source.getExtractInfo().asAtDate,
+      matterFinancials: matterFins,
+      invoices: invBalances,
+      timeEntries,
+      payments,
+      clients,
+      feeEarners,
+    });
+    expect(rollups.pmsDepartmentFinancials.firmTotal.billedThisYearPence).toBe(18167348);
+    expect(rollups.pmsDepartmentFinancials.firmTotal.unbilledWipPence).toBe(3414000);
+    expect(rollups.pmsDepartmentFinancials.firmTotal.outstandingDebtPence).toBe(4913022);
+    expect(rollups.pmsDepartmentFinancials.firmTotal.overdueDebtPence).toBe(878160);
+    expect(rollups.allClientFins[0]?.unbilled_wip_pence).toBeTypeOf('number');
+    expect(rollups.allFeeEarnerPerformance[0]?.time_value_pence).toBeTypeOf('number');
+  });
+
+  it('R831: parseMoneyPence rejects corrupt or exponent money cells with a plain location error and logs no cell values', async () => {
+    const { vi } = await import('vitest');
+    const warnSpy = vi.spyOn(console, 'warn').mockImplementation(() => {});
+    const errSpy = vi.spyOn(console, 'error').mockImplementation(() => {});
+    try {
+      const badInputs: Array<string | number> = [
+        'CORRUPT_SECRET_TEXT',
+        'NaN',
+        'Infinity',
+        '12.34.56',
+        '1e5',
+        '1e-4',
+        Number.NaN,
+        Number.POSITIVE_INFINITY,
+      ];
+      for (const bad of badInputs) {
+        let caught: Error | null = null;
+        try {
+          parseMoneyPence(bad, {
+            sheet: 'invoices',
+            row: 7,
+            column: 'fees_net',
+          });
+        } catch (e) {
+          caught = e as Error;
+        }
+        expect(caught).toBeInstanceOf(Error);
+        expect(caught!.message).toContain('sheet "invoices"');
+        expect(caught!.message).toContain('row 7');
+        expect(caught!.message).toContain('column "fees_net"');
+        expect(caught!.message).not.toContain('CORRUPT_SECRET_TEXT');
+        expect(caught!.message).not.toContain('12.34.56');
+      }
+      expect(warnSpy).not.toHaveBeenCalled();
+      expect(errSpy).not.toHaveBeenCalled();
+    } finally {
+      warnSpy.mockRestore();
+      errSpy.mockRestore();
+    }
   });
 });
 

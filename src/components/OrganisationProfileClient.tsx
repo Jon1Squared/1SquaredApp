@@ -9,7 +9,7 @@ import { enquiryDisplayName } from '@/domain/enquiries';
 import { formatAddress } from '@/domain/fieldRegistry';
 import { resolveLabel, resolveLabels, systemKeyOf } from '@/domain/lists';
 import { personDisplayName, primaryEmail } from '@/domain/names';
-import { formatGbp, formatPmsAsAtLabel, formatWholePct } from '@/domain/pms';
+import { formatGbp, formatPmsAsAtLabel, formatWholePct, resolvePmsPence } from '@/domain/pms';
 import type { ClientCddSummary } from '@/domain/cdd';
 import type {
   AppRole,
@@ -26,9 +26,11 @@ import type {
   Task,
   Team,
 } from '@/domain/types';
-import type {
-  ClientRateOverrideRecord,
-  ParentChainNodeSummary,
+import {
+  minorUnitsToPounds,
+  sumMinorUnits,
+  type ClientRateOverrideRecord,
+  type ParentChainNodeSummary,
 } from '@platform/core-api';
 import type {
   ClientPmsViewBundle,
@@ -469,7 +471,14 @@ export function OrganisationProfileClient({
   const distinctBadges = Array.from(new Set(displayMatters.map((m) => m.badge))).join(', ');
 
   const overdueDebtTotal = pmsFin
-    ? pmsFin.aged_1_30 + pmsFin.aged_31_60 + pmsFin.aged_61_90 + pmsFin.aged_90_plus
+    ? minorUnitsToPounds(
+        sumMinorUnits([
+          resolvePmsPence(pmsFin.aged_1_30_pence, pmsFin.aged_1_30),
+          resolvePmsPence(pmsFin.aged_31_60_pence, pmsFin.aged_31_60),
+          resolvePmsPence(pmsFin.aged_61_90_pence, pmsFin.aged_61_90),
+          resolvePmsPence(pmsFin.aged_90_plus_pence, pmsFin.aged_90_plus),
+        ]),
+      )
     : 0;
 
   const creditPctText =

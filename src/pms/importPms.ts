@@ -7,9 +7,11 @@
 import fs from 'node:fs';
 import path from 'node:path';
 import {
+  minorUnitsToPounds,
   TenantPmsRepository,
   type TenantContext,
   type TenantPmsClient,
+  type MinorUnits,
   type TenantPmsDisbursement,
   type TenantPmsExtractDataset,
   type TenantPmsFeeEarner,
@@ -20,7 +22,12 @@ import {
   type TenantPmsTimeEntry,
 } from '@platform/core';
 import { isValidPmsAsAtDate } from '../domain/pms';
-import { excelSerialToIsoDate, openXlsxWorkbook, parseMoney } from './xlsxReader';
+import {
+  excelSerialToIsoDate,
+  getXlsxRowNumber,
+  openXlsxWorkbook,
+  parseMoneyPence,
+} from './xlsxReader';
 
 export const DEFAULT_XLSX_PATH = path.join(
   process.cwd(),
@@ -196,9 +203,20 @@ export function parsePmsWorkbookDataset(options?: {
   const matterCodes = new Set<string>();
   const invoiceNumbers = new Set<string>();
 
-  const feeEarners: TenantPmsFeeEarner[] = feeEarnersRows.map((r) => {
+  const feeEarners: TenantPmsFeeEarner[] = feeEarnersRows.map((r, idx) => {
     const id = r.fee_earner_id;
+    const row = getXlsxRowNumber(r, idx + 2);
     feeEarnerIds.add(id);
+    const ratePence = parseMoneyPence(r.standard_hourly_rate, {
+      sheet: 'fee_earners',
+      row,
+      column: 'standard_hourly_rate',
+    });
+    const targetFeesPence = parseMoneyPence(r.annual_target_fees, {
+      sheet: 'fee_earners',
+      row,
+      column: 'annual_target_fees',
+    });
     return {
       fee_earner_id: id,
       initials: r.initials,
@@ -207,15 +225,18 @@ export function parsePmsWorkbookDataset(options?: {
       email: (r.email ?? '').replace(/\.co\.uk$/i, '.example'),
       grade: r.grade,
       department: r.department,
-      standard_hourly_rate: parseMoney(r.standard_hourly_rate),
+      standard_hourly_rate: minorUnitsToPounds(ratePence),
+      standard_hourly_rate_pence: ratePence,
       annual_target_hours: parseInt(r.annual_target_hours, 10) || 0,
-      annual_target_fees: parseMoney(r.annual_target_fees),
+      annual_target_fees: minorUnitsToPounds(targetFeesPence),
+      annual_target_fees_pence: targetFeesPence,
       active: r.active || 'Yes',
     };
   });
 
-  const clients: TenantPmsClient[] = clientsRows.map((r) => {
+  const clients: TenantPmsClient[] = clientsRows.map((r, idx) => {
     const code = r.client_code;
+    const row = getXlsxRowNumber(r, idx + 2);
     assertForeignKeyExists(
       feeEarnerIds,
       r.client_partner_id,
@@ -225,6 +246,11 @@ export function parsePmsWorkbookDataset(options?: {
       'fee_earners',
     );
     clientCodes.add(code);
+    const creditLimitPence = parseMoneyPence(r.credit_limit, {
+      sheet: 'clients',
+      row,
+      column: 'credit_limit',
+    });
     return {
       client_code: code,
       client_name: r.client_name,
@@ -236,7 +262,8 @@ export function parsePmsWorkbookDataset(options?: {
       postcode: r.postcode ?? '',
       client_partner_id: r.client_partner_id,
       credit_terms_days: parseInt(r.credit_terms_days, 10) || 0,
-      credit_limit: parseMoney(r.credit_limit),
+      credit_limit: minorUnitsToPounds(creditLimitPence),
+      credit_limit_pence: creditLimitPence,
       rate_discount_pct: Number(r.rate_discount_pct || 0),
       date_opened: excelSerialToIsoDate(r.date_opened) ?? asAtDate,
       sector: r.sector ?? '',
@@ -245,8 +272,9 @@ export function parsePmsWorkbookDataset(options?: {
     };
   });
 
-  const matters: TenantPmsMatter[] = mattersRows.map((r) => {
+  const matters: TenantPmsMatter[] = mattersRows.map((r, idx) => {
     const code = r.matter_code;
+    const row = getXlsxRowNumber(r, idx + 2);
     assertForeignKeyExists(clientCodes, r.client_code, 'matters', code, 'client_code', 'clients');
     assertForeignKeyExists(
       feeEarnerIds,
@@ -265,6 +293,16 @@ export function parsePmsWorkbookDataset(options?: {
       'fee_earners',
     );
     matterCodes.add(code);
+    const fixedFeePence = parseMoneyPence(r.fixed_fee_amount, {
+      sheet: 'matters',
+      row,
+      column: 'fixed_fee_amount',
+    });
+    const feeEstimatePence = parseMoneyPence(r.fee_estimate, {
+      sheet: 'matters',
+      row,
+      column: 'fee_estimate',
+    });
     return {
       matter_code: code,
       client_code: r.client_code,
@@ -274,8 +312,10 @@ export function parsePmsWorkbookDataset(options?: {
       responsible_partner_id: r.responsible_partner_id,
       fee_earner_id: r.fee_earner_id,
       billing_basis: r.billing_basis as TenantPmsMatter['billing_basis'],
-      fixed_fee_amount: parseMoney(r.fixed_fee_amount),
-      fee_estimate: parseMoney(r.fee_estimate),
+      fixed_fee_amount: minorUnitsToPounds(fixedFeePence),
+      fixed_fee_amount_pence: fixedFeePence,
+      fee_estimate: minorUnitsToPounds(feeEstimatePence),
+      fee_estimate_pence: feeEstimatePence,
       estimate_alert_pct: Number(r.estimate_alert_pct || 0.75),
       date_opened: excelSerialToIsoDate(r.date_opened) ?? asAtDate,
       date_closed: excelSerialToIsoDate(r.date_closed),
@@ -288,8 +328,9 @@ export function parsePmsWorkbookDataset(options?: {
 
   const feeById = new Map(feeEarners.map((f) => [f.fee_earner_id, f]));
 
-  const feeEstimates: TenantPmsFeeEstimate[] = feeEstimatesRows.map((r) => {
+  const feeEstimates: TenantPmsFeeEstimate[] = feeEstimatesRows.map((r, idx) => {
     const id = r.estimate_id;
+    const row = getXlsxRowNumber(r, idx + 2);
     assertForeignKeyExists(
       matterCodes,
       r.matter_code,
@@ -307,13 +348,25 @@ export function parsePmsWorkbookDataset(options?: {
       'fee_earners',
     );
     const fe = feeById.get(r.given_by);
+    const feesEstPence = parseMoneyPence(r.fees_estimate, {
+      sheet: 'fee_estimates',
+      row,
+      column: 'fees_estimate',
+    });
+    const disbEstPence = parseMoneyPence(r.disbursements_estimate, {
+      sheet: 'fee_estimates',
+      row,
+      column: 'disbursements_estimate',
+    });
     return {
       estimate_id: id,
       matter_code: r.matter_code,
       date_given: excelSerialToIsoDate(r.date_given) ?? asAtDate,
       estimate_type: r.estimate_type as TenantPmsFeeEstimate['estimate_type'],
-      fees_estimate: parseMoney(r.fees_estimate),
-      disbursements_estimate: parseMoney(r.disbursements_estimate),
+      fees_estimate: minorUnitsToPounds(feesEstPence),
+      fees_estimate_pence: feesEstPence,
+      disbursements_estimate: minorUnitsToPounds(disbEstPence),
+      disbursements_estimate_pence: disbEstPence,
       given_by: r.given_by,
       given_by_name: fe ? `${fe.first_name} ${fe.last_name}` : undefined,
       accepted_by_client: r.accepted_by_client as TenantPmsFeeEstimate['accepted_by_client'],
@@ -321,8 +374,9 @@ export function parsePmsWorkbookDataset(options?: {
     };
   });
 
-  const invoices: TenantPmsInvoiceRow[] = invoicesRows.map((r) => {
+  const invoices: TenantPmsInvoiceRow[] = invoicesRows.map((r, idx) => {
     const invNo = r.invoice_number;
+    const row = getXlsxRowNumber(r, idx + 2);
     assertForeignKeyExists(
       matterCodes,
       r.matter_code,
@@ -351,6 +405,26 @@ export function parsePmsWorkbookDataset(options?: {
       );
     }
     invoiceNumbers.add(invNo);
+    const feesNetPence = parseMoneyPence(r.fees_net, {
+      sheet: 'invoices',
+      row,
+      column: 'fees_net',
+    });
+    const disbNetPence = parseMoneyPence(r.disbursements_net, {
+      sheet: 'invoices',
+      row,
+      column: 'disbursements_net',
+    });
+    const vatPence = parseMoneyPence(r.vat, {
+      sheet: 'invoices',
+      row,
+      column: 'vat',
+    });
+    const totalPence = parseMoneyPence(r.total, {
+      sheet: 'invoices',
+      row,
+      column: 'total',
+    });
     return {
       invoice_number: invNo,
       matter_code: r.matter_code,
@@ -360,17 +434,22 @@ export function parsePmsWorkbookDataset(options?: {
       invoice_type: r.invoice_type,
       period_from: excelSerialToIsoDate(r.period_from),
       period_to: excelSerialToIsoDate(r.period_to),
-      fees_net: parseMoney(r.fees_net),
-      disbursements_net: parseMoney(r.disbursements_net),
-      vat: parseMoney(r.vat),
-      total: parseMoney(r.total),
+      fees_net: minorUnitsToPounds(feesNetPence),
+      fees_net_pence: feesNetPence,
+      disbursements_net: minorUnitsToPounds(disbNetPence),
+      disbursements_net_pence: disbNetPence,
+      vat: minorUnitsToPounds(vatPence),
+      vat_pence: vatPence,
+      total: minorUnitsToPounds(totalPence),
+      total_pence: totalPence,
       status: r.status,
       credit_note_for: cnFor,
     };
   });
 
-  const timeEntries: TenantPmsTimeEntry[] = timeEntriesRows.map((r) => {
+  const timeEntries: TenantPmsTimeEntry[] = timeEntriesRows.map((r, idx) => {
     const id = r.time_id;
+    const row = getXlsxRowNumber(r, idx + 2);
     assertForeignKeyExists(
       matterCodes,
       r.matter_code,
@@ -399,6 +478,26 @@ export function parsePmsWorkbookDataset(options?: {
       );
     }
     const fe = feeById.get(r.fee_earner_id);
+    const ratePence = parseMoneyPence(r.rate, {
+      sheet: 'time_entries',
+      row,
+      column: 'rate',
+    });
+    const valuePence = parseMoneyPence(r.value, {
+      sheet: 'time_entries',
+      row,
+      column: 'value',
+    });
+    const billedValuePence = parseMoneyPence(r.billed_value, {
+      sheet: 'time_entries',
+      row,
+      column: 'billed_value',
+    });
+    const writeOffValuePence = parseMoneyPence(r.write_off_value, {
+      sheet: 'time_entries',
+      row,
+      column: 'write_off_value',
+    });
     return {
       time_id: id,
       matter_code: r.matter_code,
@@ -411,18 +510,23 @@ export function parsePmsWorkbookDataset(options?: {
       minutes: parseInt(r.minutes, 10) || 0,
       units: parseInt(r.units, 10) || 0,
       hours: Math.round((Number(r.hours || 0) + Number.EPSILON) * 10000) / 10000,
-      rate: parseMoney(r.rate),
-      value: parseMoney(r.value),
+      rate: minorUnitsToPounds(ratePence),
+      rate_pence: ratePence,
+      value: minorUnitsToPounds(valuePence),
+      value_pence: valuePence,
       chargeable: (r.chargeable || 'Y') as 'Y' | 'N',
       billed_status: r.billed_status as TenantPmsTimeEntry['billed_status'],
       invoice_number: invNo,
-      billed_value: parseMoney(r.billed_value),
-      write_off_value: parseMoney(r.write_off_value),
+      billed_value: minorUnitsToPounds(billedValuePence),
+      billed_value_pence: billedValuePence,
+      write_off_value: minorUnitsToPounds(writeOffValuePence),
+      write_off_value_pence: writeOffValuePence,
     };
   });
 
-  const disbursements: TenantPmsDisbursement[] = disbursementsRows.map((r) => {
+  const disbursements: TenantPmsDisbursement[] = disbursementsRows.map((r, idx) => {
     const id = r.disbursement_id;
+    const row = getXlsxRowNumber(r, idx + 2);
     assertForeignKeyExists(
       matterCodes,
       r.matter_code,
@@ -442,6 +546,21 @@ export function parsePmsWorkbookDataset(options?: {
         'invoices',
       );
     }
+    const netAmountPence = parseMoneyPence(r.net_amount, {
+      sheet: 'disbursements',
+      row,
+      column: 'net_amount',
+    });
+    const vatAmountPence = parseMoneyPence(r.vat_amount, {
+      sheet: 'disbursements',
+      row,
+      column: 'vat_amount',
+    });
+    const grossAmountPence = parseMoneyPence(r.gross_amount, {
+      sheet: 'disbursements',
+      row,
+      column: 'gross_amount',
+    });
     return {
       disbursement_id: id,
       matter_code: r.matter_code,
@@ -449,17 +568,21 @@ export function parsePmsWorkbookDataset(options?: {
       type: r.type,
       supplier: r.supplier,
       description: r.description,
-      net_amount: parseMoney(r.net_amount),
-      vat_amount: parseMoney(r.vat_amount),
-      gross_amount: parseMoney(r.gross_amount),
+      net_amount: minorUnitsToPounds(netAmountPence),
+      net_amount_pence: netAmountPence,
+      vat_amount: minorUnitsToPounds(vatAmountPence),
+      vat_amount_pence: vatAmountPence,
+      gross_amount: minorUnitsToPounds(grossAmountPence),
+      gross_amount_pence: grossAmountPence,
       paid_from: r.paid_from as TenantPmsDisbursement['paid_from'],
       billed_status: r.billed_status as TenantPmsDisbursement['billed_status'],
       invoice_number: invNo,
     };
   });
 
-  const payments: TenantPmsPayment[] = paymentsRows.map((r) => {
+  const payments: TenantPmsPayment[] = paymentsRows.map((r, idx) => {
     const id = r.receipt_id;
+    const row = getXlsxRowNumber(r, idx + 2);
     assertForeignKeyExists(
       invoiceNumbers,
       r.invoice_number,
@@ -484,20 +607,27 @@ export function parsePmsWorkbookDataset(options?: {
       'client_code',
       'clients',
     );
+    const amountPence = parseMoneyPence(r.amount, {
+      sheet: 'payments',
+      row,
+      column: 'amount',
+    });
     return {
       receipt_id: id,
       invoice_number: r.invoice_number,
       matter_code: r.matter_code,
       client_code: r.client_code,
       receipt_date: excelSerialToIsoDate(r.receipt_date) ?? asAtDate,
-      amount: parseMoney(r.amount),
+      amount: minorUnitsToPounds(amountPence),
+      amount_pence: amountPence,
       method: r.method,
       reference: r.reference,
     };
   });
 
-  const clientAccount = clientAccountRows.map((r) => {
+  const clientAccount = clientAccountRows.map((r, idx) => {
     const id = r.transaction_id;
+    const row = getXlsxRowNumber(r, idx + 2);
     assertForeignKeyExists(
       matterCodes,
       r.matter_code,
@@ -514,6 +644,11 @@ export function parsePmsWorkbookDataset(options?: {
       'client_code',
       'clients',
     );
+    const amountPence: MinorUnits = parseMoneyPence(r.amount, {
+      sheet: 'client_account',
+      row,
+      column: 'amount',
+    });
     return {
       transaction_id: id,
       matter_code: r.matter_code,
@@ -521,7 +656,8 @@ export function parsePmsWorkbookDataset(options?: {
       date: excelSerialToIsoDate(r.date) ?? asAtDate,
       type: r.type as 'Receipt' | 'Payment' | 'Transfer to office',
       description: r.description,
-      amount: parseMoney(r.amount),
+      amount: minorUnitsToPounds(amountPence),
+      amount_pence: amountPence,
     };
   });
 

@@ -171,5 +171,99 @@ export function sumMinorUnits(amounts: readonly MinorUnits[]): MinorUnits {
     assertSafeInteger(amount, `amounts[${i}]`);
     total += BigInt(amount);
   }
-  return toSafeNumber(total, 'Summed minor units');
+  const result = toSafeNumber(total, 'Summed minor units');
+  return result === 0 ? 0 : result;
+}
+
+const PG_BIGINT_RE = /^\s*([-+]?\d+)\s*$/;
+
+/**
+ * Parse a PostgreSQL `BIGINT` (`int8`) value (returned by `pg` as a decimal string),
+ * `bigint`, or safe integer `number` into a validated `MinorUnits` integer.
+ * Rejects fractional decimals, exponential strings, non-finite values, and values
+ * outside `[Number.MIN_SAFE_INTEGER, Number.MAX_SAFE_INTEGER]`.
+ */
+export function pgBigIntToMinorUnits(
+  value: string | number | bigint,
+  label = 'PostgreSQL BIGINT minor units',
+): MinorUnits {
+  let parsed: bigint;
+  if (typeof value === 'bigint') {
+    parsed = value;
+  } else if (typeof value === 'number') {
+    if (!Number.isFinite(value) || !Number.isSafeInteger(value)) {
+      throw new RangeError(`${label} must be a safe integer (received ${String(value)})`);
+    }
+    parsed = BigInt(value);
+  } else if (typeof value === 'string') {
+    const match = PG_BIGINT_RE.exec(value);
+    if (!match) {
+      throw new RangeError(`${label} must be an integer string (received "${value}")`);
+    }
+    parsed = BigInt(match[1]!);
+  } else {
+    throw new TypeError(`${label} must be a bigint string, bigint, or safe integer`);
+  }
+  const num = toSafeNumber(parsed, label);
+  return num === 0 ? 0 : num;
+}
+
+/**
+ * Validate and format a safe `MinorUnits` integer as a canonical PostgreSQL
+ * `BIGINT` parameter decimal string (normalising `-0` to `'0'`).
+ */
+export function minorUnitsToPgBigInt(minorUnits: MinorUnits): string {
+  assertSafeInteger(minorUnits, 'minorUnits');
+  if (minorUnits === 0) {
+    return '0';
+  }
+  return BigInt(minorUnits).toString();
+}
+
+/**
+ * Compute `minuend - subtrahend` using exact `BigInt` integer minor-unit arithmetic
+ * with safe-integer bounds validation.
+ */
+export function subtractMinorUnits(
+  minuend: MinorUnits,
+  subtrahend: MinorUnits,
+): MinorUnits {
+  assertSafeInteger(minuend, 'minuend');
+  assertSafeInteger(subtrahend, 'subtrahend');
+  const diff = BigInt(minuend) - BigInt(subtrahend);
+  const result = toSafeNumber(diff, 'Subtracted minor units');
+  return result === 0 ? 0 : result;
+}
+
+export interface FormatMinorUnitsGbpOptions {
+  /** Format negative values with accounting brackets `(£12.34)` instead of `-£12.34`. */
+  readonly accountingBrackets?: boolean;
+  /** Omit `.00` when the magnitude is an exact number of pounds (e.g. `£1,200`). */
+  readonly omitZeroPence?: boolean;
+}
+
+/**
+ * Pure integer GBP currency formatter operating directly on minor units (pence)
+ * without converting to IEEE-754 floating-point pounds.
+ */
+export function formatMinorUnitsGbp(
+  minorUnits: MinorUnits,
+  options?: FormatMinorUnitsGbpOptions,
+): string {
+  assertSafeInteger(minorUnits, 'minorUnits');
+  const isNegative = minorUnits < 0;
+  const absBig = isNegative ? -BigInt(minorUnits) : BigInt(minorUnits);
+  const wholePoundsBig = absBig / BIGINT_HUNDRED;
+  const pencePart = Number(absBig % BIGINT_HUNDRED);
+  const groupedPounds = wholePoundsBig
+    .toString()
+    .replace(/\B(?=(\d{3})+(?!\d))/g, ',');
+  const includePence = !(options?.omitZeroPence && pencePart === 0);
+  const unsigned = includePence
+    ? `£${groupedPounds}.${String(pencePart).padStart(2, '0')}`
+    : `£${groupedPounds}`;
+  if (!isNegative) {
+    return unsigned;
+  }
+  return options?.accountingBrackets ? `(${unsigned})` : `-${unsigned}`;
 }

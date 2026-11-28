@@ -2252,4 +2252,725 @@ describe('S0-18: PostgreSQL Per-Tenant PMS Data & PMS Links Repository, ADR 0029
       clearPermissionRequestCache();
     }
   });
+
+  it('S1-12 (ADR 0041): dual-writes *_pence and legacy columns, reads solely from *_pence + payload_json->>key (ignoring tampered float columns), preserves negative credit notes & client account entries, and isolates two tenants', async () => {
+    const ctxA = makeTenantContext('tenant-a', 'P-000001');
+    const ctxB = makeTenantContext('tenant-b', 'P-000001');
+    const pmsRepo = getPmsRepository();
+    const matterRepo = getMatterRepository();
+    const baseStore = loadCommittedSeedStore();
+
+    await importFirmStoreModulesToPostgres({
+      ctx: ctxA,
+      store: baseStore,
+      tenantConfig: { ...getActiveTenantConfiguration(), tenantId: ctxA.tenantId },
+      modules: ['parties', 'matters', 'intake', 'quotes', 'tasks', 'hr', 'catalogues'],
+      clearFirst: true,
+    });
+    await importFirmStoreModulesToPostgres({
+      ctx: ctxB,
+      store: baseStore,
+      tenantConfig: { ...getActiveTenantConfiguration(), tenantId: ctxB.tenantId },
+      modules: ['parties', 'matters', 'intake', 'quotes', 'tasks', 'hr', 'catalogues'],
+      clearFirst: true,
+    });
+
+    const datasetA: TenantPmsExtractDataset = {
+      extractInfo: {
+        asAtDate: '2026-10-31',
+        sourceFile: 's112-alpha.xlsx',
+        importedAt: '2026-10-31T09:00:00.000Z',
+      },
+      feeEarners: [
+        {
+          fee_earner_id: 'FE-S112-A',
+          initials: 'SA',
+          first_name: 'Sioned',
+          last_name: 'ap Hywel',
+          email: 'sioned@example.test',
+          grade: 'Partner',
+          department: 'Corporate',
+          standard_hourly_rate: 325.5,
+          annual_target_hours: 1200,
+          annual_target_fees: 245000.75,
+          active: 'Yes',
+        },
+      ],
+      clients: [
+        {
+          client_code: 'CL-S112-A',
+          client_name: 'S112 Alpha Ltd',
+          client_type: 'Organisation',
+          company_number: '11223344',
+          email: 'accounts@s112a.example',
+          phone: '01632960112',
+          billing_address: '10 Cardiff Road',
+          postcode: 'CF10 1AA',
+          client_partner_id: 'FE-S112-A',
+          credit_terms_days: 30,
+          credit_limit: 50000.25,
+          rate_discount_pct: 0,
+          date_opened: '2026-01-01',
+          sector: 'Tech',
+          crm_match_on: 'company_number',
+          status: 'Active',
+        },
+      ],
+      matters: [
+        {
+          matter_code: 'MAT-S112-A',
+          client_code: 'CL-S112-A',
+          matter_description: 'S112 Integer Pence Matter',
+          work_type: 'Advisory',
+          practice_area: 'Corporate',
+          responsible_partner_id: 'FE-S112-A',
+          fee_earner_id: 'FE-S112-A',
+          billing_basis: 'Hourly Rate',
+          fixed_fee_amount: 12500.5,
+          fee_estimate: 10000.1,
+          estimate_alert_pct: 0.75,
+          date_opened: '2026-09-01',
+          date_closed: null,
+          status: 'Open',
+          billing_frequency: 'Monthly',
+          client_reference: 'REF-S112',
+          third_party_payer: '',
+        },
+      ],
+      feeEstimates: [
+        {
+          estimate_id: 'EST-S112-A',
+          matter_code: 'MAT-S112-A',
+          date_given: '2026-09-02',
+          estimate_type: 'Initial',
+          fees_estimate: 1500.25,
+          disbursements_estimate: 300.75,
+          given_by: 'FE-S112-A',
+          accepted_by_client: 'Yes',
+          notes: 'S112 check',
+        },
+      ],
+      invoices: [
+        {
+          invoice_number: 'INV-S112-1',
+          matter_code: 'MAT-S112-A',
+          client_code: 'CL-S112-A',
+          invoice_date: '2026-10-01',
+          due_date: '2026-10-31',
+          invoice_type: 'Interim',
+          period_from: '2026-09-01',
+          period_to: '2026-09-30',
+          fees_net: 1000.1,
+          disbursements_net: 100.2,
+          vat: 220.06,
+          total: 1320.36,
+          status: 'Issued',
+          credit_note_for: null,
+        },
+        {
+          invoice_number: 'CN-S112-1',
+          matter_code: 'MAT-S112-A',
+          client_code: 'CL-S112-A',
+          invoice_date: '2026-10-15',
+          due_date: '2026-10-15',
+          invoice_type: 'Credit note',
+          period_from: null,
+          period_to: null,
+          fees_net: -20,
+          disbursements_net: 0,
+          vat: -4,
+          total: -24,
+          status: 'Issued',
+          credit_note_for: 'INV-S112-1',
+        },
+      ],
+      payments: [
+        {
+          receipt_id: 'REC-S112-1',
+          invoice_number: 'INV-S112-1',
+          matter_code: 'MAT-S112-A',
+          client_code: 'CL-S112-A',
+          receipt_date: '2026-10-10',
+          amount: 500.11,
+          method: 'BACS',
+          reference: 'BACS-S112',
+        },
+      ],
+      timeEntries: [
+        {
+          time_id: 'TE-S112-1',
+          matter_code: 'MAT-S112-A',
+          fee_earner_id: 'FE-S112-A',
+          date: '2026-10-05',
+          activity: 'Drafting',
+          narrative: 'Exact pence work',
+          minutes: 60,
+          units: 10,
+          hours: 1,
+          rate: 325.5,
+          value: 325.5,
+          chargeable: 'Y',
+          billed_status: 'Unbilled',
+          invoice_number: null,
+          billed_value: 0,
+          write_off_value: 15.25,
+        },
+      ],
+      disbursements: [
+        {
+          disbursement_id: 'DISB-S112-1',
+          matter_code: 'MAT-S112-A',
+          date: '2026-10-06',
+          type: 'Search',
+          supplier: 'Land Registry',
+          description: 'Official copy',
+          net_amount: 42.1,
+          vat_amount: 8.42,
+          gross_amount: 50.52,
+          paid_from: 'Office',
+          billed_status: 'Unbilled',
+          invoice_number: null,
+        },
+      ],
+      clientAccount: [
+        {
+          transaction_id: 'CA-S112-1',
+          matter_code: 'MAT-S112-A',
+          client_code: 'CL-S112-A',
+          date: '2026-10-01',
+          type: 'Receipt',
+          description: 'Monies on account',
+          amount: 1000.5,
+        },
+        {
+          transaction_id: 'CA-S112-2',
+          matter_code: 'MAT-S112-A',
+          client_code: 'CL-S112-A',
+          date: '2026-10-08',
+          type: 'Payment',
+          description: 'Partial refund',
+          amount: -250.25,
+        },
+      ],
+    };
+
+    const datasetB = buildSyntheticDataset({
+      suffix: 'B',
+      asAtDate: '2026-11-15',
+      wipAmount: 8888,
+      invoiceNet: 2000,
+      unlinkedWipAmount: 4444,
+    });
+
+    await pmsRepo.clearTenantData(ctxA);
+    await pmsRepo.importExtractDataset(ctxA, datasetA);
+    await pmsRepo.clearTenantData(ctxB);
+    await pmsRepo.importExtractDataset(ctxB, datasetB);
+
+    // Update retainerMoniesOnAccountGbp on Tenant A vs Tenant B
+    const matterA = await matterRepo.getMatterById(ctxA, baseStore.matters[0]!.id);
+    const matterB = await matterRepo.getMatterById(ctxB, baseStore.matters[0]!.id);
+    expect(matterA).not.toBeNull();
+    expect(matterB).not.toBeNull();
+    await matterRepo.updateMatter(
+      ctxA,
+      { ...matterA!, retainerMoniesOnAccountGbp: 765.43 },
+      matterA!.rowVersion ?? 1,
+    );
+    await matterRepo.updateMatter(
+      ctxB,
+      { ...matterB!, retainerMoniesOnAccountGbp: 111.22 },
+      matterB!.rowVersion ?? 1,
+    );
+
+    const directA = await createDirectMigrationClient({ ctx: ctxA });
+    try {
+      // Verify dual-write populated BOTH *_pence and legacy columns before tampering
+      const preCheck = await directA.query<{
+        pence: string;
+        legacy: number;
+      }>(
+        `SELECT amount_pence::text AS pence, amount AS legacy
+           FROM public.pms_client_account_entries
+          WHERE tenant_id = $1 AND transaction_id = 'CA-S112-2'`,
+        [ctxA.tenantId],
+      );
+      expect(preCheck.rows[0]).toEqual({ pence: '-25025', legacy: -250.25 });
+
+      const matPre = await directA.query<{ retainer_pence: string; retainer_json: string }>(
+        `SELECT retainer_monies_on_account_pence::text AS retainer_pence,
+                costs_json->>'retainerMoniesOnAccountGbp' AS retainer_json
+           FROM public.matters
+          WHERE tenant_id = $1 AND id = $2`,
+        [ctxA.tenantId, matterA!.id],
+      );
+      expect(matPre.rows[0]).toEqual({ retainer_pence: '76543', retainer_json: '765.43' });
+
+      // Corrupt ALL legacy float columns + legacy JSON retainer in Tenant A
+      await directA.query(
+        `UPDATE public.pms_fee_earners SET charge_out_rate = 999999.99 WHERE tenant_id = $1`,
+        [ctxA.tenantId],
+      );
+      await directA.query(
+        `UPDATE public.pms_matters SET fee_estimate = 999999.99 WHERE tenant_id = $1`,
+        [ctxA.tenantId],
+      );
+      await directA.query(
+        `UPDATE public.pms_fee_estimates SET estimated_fees_ex_vat = 999999.99 WHERE tenant_id = $1`,
+        [ctxA.tenantId],
+      );
+      await directA.query(
+        `UPDATE public.pms_invoices SET total_inc_vat = 999999.99 WHERE tenant_id = $1`,
+        [ctxA.tenantId],
+      );
+      await directA.query(
+        `UPDATE public.pms_payments SET amount = 999999.99 WHERE tenant_id = $1`,
+        [ctxA.tenantId],
+      );
+      await directA.query(
+        `UPDATE public.pms_time_entries SET value = 999999.99 WHERE tenant_id = $1`,
+        [ctxA.tenantId],
+      );
+      await directA.query(
+        `UPDATE public.pms_disbursements SET amount_ex_vat = 999999.99 WHERE tenant_id = $1`,
+        [ctxA.tenantId],
+      );
+      await directA.query(
+        `UPDATE public.pms_client_account_entries SET amount = 999999.99, balance_after = 999999.99 WHERE tenant_id = $1`,
+        [ctxA.tenantId],
+      );
+      await directA.query(
+        `UPDATE public.matters
+            SET costs_json = jsonb_set(costs_json, '{retainerMoniesOnAccountGbp}', '999999.99'::jsonb),
+                opening_record_json = jsonb_set(opening_record_json, '{retainerMoniesOnAccountGbp}', '999999.99'::jsonb)
+          WHERE tenant_id = $1 AND id = $2`,
+        [ctxA.tenantId, matterA!.id],
+      );
+    } finally {
+      await directA.end();
+    }
+
+    // Reads come SOLELY from *_pence + payload_json->>'<key>', completely ignoring tampered floats
+    const snapA = await pmsRepo.loadTenantPmsSnapshot(ctxA);
+    expect(snapA.feeEarners[0]?.standard_hourly_rate).toBe(325.5);
+    expect(snapA.feeEarners[0]?.standard_hourly_rate_pence).toBe(32550);
+    expect(snapA.feeEarners[0]?.annual_target_fees).toBe(245000.75);
+    expect(snapA.feeEarners[0]?.annual_target_fees_pence).toBe(24500075);
+    expect(snapA.clients[0]?.credit_limit).toBe(50000.25);
+    expect(snapA.clients[0]?.credit_limit_pence).toBe(5000025);
+    expect(snapA.matters[0]?.fee_estimate).toBe(10000.1);
+    expect(snapA.matters[0]?.fee_estimate_pence).toBe(1000010);
+    expect(snapA.matters[0]?.fixed_fee_amount).toBe(12500.5);
+    expect(snapA.matters[0]?.fixed_fee_amount_pence).toBe(1250050);
+    expect(snapA.feeEstimates[0]?.fees_estimate).toBe(1500.25);
+    expect(snapA.feeEstimates[0]?.fees_estimate_pence).toBe(150025);
+    expect(snapA.feeEstimates[0]?.disbursements_estimate).toBe(300.75);
+    expect(snapA.feeEstimates[0]?.disbursements_estimate_pence).toBe(30075);
+    expect(snapA.timeEntries[0]?.rate).toBe(325.5);
+    expect(snapA.timeEntries[0]?.rate_pence).toBe(32550);
+    expect(snapA.timeEntries[0]?.value).toBe(325.5);
+    expect(snapA.timeEntries[0]?.value_pence).toBe(32550);
+    expect(snapA.timeEntries[0]?.write_off_value).toBe(15.25);
+    expect(snapA.timeEntries[0]?.write_off_value_pence).toBe(1525);
+    expect(snapA.disbursements[0]?.net_amount).toBe(42.1);
+    expect(snapA.disbursements[0]?.net_amount_pence).toBe(4210);
+    expect(snapA.disbursements[0]?.vat_amount).toBe(8.42);
+    expect(snapA.disbursements[0]?.vat_amount_pence).toBe(842);
+    expect(snapA.disbursements[0]?.gross_amount).toBe(50.52);
+    expect(snapA.disbursements[0]?.gross_amount_pence).toBe(5052);
+
+    const invBal = snapA.invoiceBalances.find((i) => i.invoice_number === 'INV-S112-1')!;
+    const cnBal = snapA.invoiceBalances.find((i) => i.invoice_number === 'CN-S112-1')!;
+    expect(invBal.fees_net).toBe(1000.1);
+    expect(invBal.fees_net_pence).toBe(100010);
+    expect(invBal.disbursements_net).toBe(100.2);
+    expect(invBal.disbursements_net_pence).toBe(10020);
+    expect(invBal.vat).toBe(220.06);
+    expect(invBal.vat_pence).toBe(22006);
+    expect(invBal.total).toBe(1320.36);
+    expect(invBal.total_pence).toBe(132036);
+    expect(invBal.paid).toBe(500.11);
+    expect(invBal.paid_pence).toBe(50011);
+    expect(invBal.credit_notes).toBe(-24);
+    expect(invBal.credit_notes_pence).toBe(-2400);
+    expect(invBal.outstanding).toBe(796.25); // 1320.36 - 500.11 - 24.00 exact pence
+    expect(invBal.outstanding_pence).toBe(79625);
+    expect(cnBal.total).toBe(-24);
+    expect(cnBal.total_pence).toBe(-2400);
+
+    expect(snapA.clientAccount.map((c) => [c.amount, c.running_balance])).toEqual([
+      [1000.5, 1000.5],
+      [-250.25, 750.25],
+    ]);
+    expect(
+      snapA.clientAccount.map((c) => [c.amount_pence, c.running_balance_pence]),
+    ).toEqual([
+      [100050, 100050],
+      [-25025, 75025],
+    ]);
+    expect(snapA.matterFinancials[0]?.client_account_balance).toBe(750.25);
+    expect(snapA.matterFinancials[0]?.client_account_balance_pence).toBe(75025);
+
+    const reloadedA = await matterRepo.getMatterById(ctxA, matterA!.id);
+    const reloadedB = await matterRepo.getMatterById(ctxB, matterB!.id);
+    expect(reloadedA?.retainerMoniesOnAccountGbp).toBe(765.43);
+    expect(reloadedA?.retainerMoniesOnAccountPence).toBe(76543);
+    expect(reloadedB?.retainerMoniesOnAccountGbp).toBe(111.22);
+    expect(reloadedB?.retainerMoniesOnAccountPence).toBe(11122);
+
+    // Null vs zero preservation check
+    await matterRepo.updateMatter(
+      ctxA,
+      { ...reloadedA!, retainerMoniesOnAccountGbp: null },
+      reloadedA!.rowVersion ?? 2,
+    );
+    const reloadedAfterNull = await matterRepo.getMatterById(ctxA, matterA!.id);
+    expect(reloadedAfterNull?.retainerMoniesOnAccountGbp).toBeNull();
+    expect(reloadedAfterNull?.retainerMoniesOnAccountPence).toBeNull();
+    await matterRepo.updateMatter(
+      ctxA,
+      { ...reloadedAfterNull!, retainerMoniesOnAccountGbp: 0 },
+      reloadedAfterNull!.rowVersion ?? 3,
+    );
+    const reloadedAfterZero = await matterRepo.getMatterById(ctxA, matterA!.id);
+    expect(reloadedAfterZero?.retainerMoniesOnAccountGbp).toBe(0);
+    expect(reloadedAfterZero?.retainerMoniesOnAccountPence).toBe(0);
+
+    // R829: mapClientAccountRows and computeDerivedMatterFinancials read stored balance_after_pence directly without recomputing from amount_pence
+    const directBalanceCheck = await createDirectMigrationClient({ ctx: ctxA });
+    try {
+      await directBalanceCheck.query(
+        `UPDATE public.pms_client_account_entries
+            SET balance_after_pence = 99999
+          WHERE tenant_id = $1 AND transaction_id = 'CA-S112-2'`,
+        [ctxA.tenantId],
+      );
+    } finally {
+      await directBalanceCheck.end();
+    }
+
+    const ledgerStored = await pmsRepo.getClientAccountLedger(ctxA, 'MAT-S112-A');
+    expect(ledgerStored.map((c) => c.running_balance_pence)).toEqual([
+      100050,
+      99999,
+    ]);
+    expect(ledgerStored.map((c) => c.running_balance)).toEqual([1000.5, 999.99]);
+
+    const mfStored = await pmsRepo.getMatterFinancials(ctxA, 'MAT-S112-A');
+    expect(mfStored?.client_account_balance_pence).toBe(99999);
+    expect(mfStored?.client_account_balance).toBe(999.99);
+  });
+
+  it('R830: saveMatterRecord validates retainerMoniesOnAccountGbp before reaching DB (-1, 1e-7, 0.001, NaN rejected with VALIDATION_ERROR; 1250.50 accepted)', async () => {
+    const { ctx, actorSession } = makeHostActorAndContext('P-000001');
+    const matterRepo = getMatterRepository();
+
+    await runWithActiveActorSession(actorSession, async () => {
+      const seedStore = loadCommittedSeedStore();
+      await importFirmStoreModulesToPostgres({
+        ctx,
+        store: seedStore,
+        modules: ['parties', 'matters', 'tasks', 'hr', 'catalogues'],
+        clearFirst: true,
+      });
+
+      const baseMatter = (
+        await matterRepo.listAllMattersUnfiltered<import('@/domain/types').Matter>(ctx)
+      ).find((m) => !m.isStaffMatter)!;
+      expect(baseMatter).toBeDefined();
+      const {
+        id: matterId,
+        retainerMoniesOnAccountPence: _ignoredOldPence,
+        ...matterPayload
+      } = baseMatter;
+      void _ignoredOldPence;
+
+      for (const badValue of [-1, 1e-7, 0.001, Number.NaN]) {
+        const res = await saveMatterRecord(
+          {
+            ...matterPayload,
+            retainerMoniesOnAccountGbp: badValue,
+          },
+          {
+            id: matterId,
+            byId: 'P-000001',
+            expectedRowVersion: baseMatter.rowVersion ?? 1,
+          },
+        );
+        expect(res.matter).toBeNull();
+        expect(res.code).toBe('VALIDATION_ERROR');
+        expect(res.message).toMatch(/retainer \/ monies on account/i);
+        expect(res.errors?.retainerMoniesOnAccountGbp).toBe(res.message);
+      }
+
+      const validRes = await saveMatterRecord(
+        {
+          ...matterPayload,
+          retainerMoniesOnAccountGbp: 1250.5,
+        },
+        {
+          id: matterId,
+          byId: 'P-000001',
+          expectedRowVersion: baseMatter.rowVersion ?? 1,
+        },
+      );
+      expect(validRes.errors).toBeUndefined();
+      expect(validRes.matter).not.toBeNull();
+      expect(validRes.matter?.retainerMoniesOnAccountGbp).toBe(1250.5);
+      expect(validRes.matter?.retainerMoniesOnAccountPence).toBe(125050);
+
+      const reloaded = await matterRepo.getMatterById<import('@/domain/types').Matter>(
+        ctx,
+        baseMatter.id,
+      );
+      expect(reloaded?.retainerMoniesOnAccountGbp).toBe(1250.5);
+      expect(reloaded?.retainerMoniesOnAccountPence).toBe(125050);
+    });
+  });
+
+  it('R831: toSafeMinorUnits and repository read path return null (displayed as "Not available") and emit a count-only warning for corrupt payload_json money text', async () => {
+    const { vi } = await import('vitest');
+    const { toSafeMinorUnits } = await import('@platform/core');
+    const { formatGbp } = await import('@/domain/pms');
+
+    expect(toSafeMinorUnits('CORRUPT_TEXT_SECRET')).toBeNull();
+    expect(toSafeMinorUnits('NaN')).toBeNull();
+    expect(toSafeMinorUnits('Infinity')).toBeNull();
+    expect(toSafeMinorUnits('12.34.56')).toBeNull();
+    expect(toSafeMinorUnits('1e999')).toBeNull();
+    expect(toSafeMinorUnits(Number.NaN)).toBeNull();
+    expect(toSafeMinorUnits(Number.POSITIVE_INFINITY)).toBeNull();
+    expect(toSafeMinorUnits(null)).toBeNull();
+    expect(toSafeMinorUnits('1.4210854715202004e-14')).toBe(0);
+    expect(formatGbp(null)).toBe('Not available');
+
+    const ctxA = makeTenantContext('tenant-a', 'P-000001');
+    const pmsRepo = getPmsRepository();
+    await pmsRepo.clearTenantData(ctxA);
+    await pmsRepo.importExtractDataset(
+      ctxA,
+      buildSyntheticDataset({
+        suffix: 'A',
+        asAtDate: '2026-10-16',
+        wipAmount: 500,
+        invoiceNet: 1000,
+        unlinkedWipAmount: 100,
+      }),
+    );
+
+    const direct = await createDirectMigrationClient({ ctx: ctxA });
+    try {
+      await direct.query(
+        `UPDATE public.pms_fee_earners
+            SET payload_json = jsonb_set(payload_json, '{annual_target_fees}', '"CORRUPT_TEXT_SECRET_42"'::jsonb)
+          WHERE tenant_id = $1`,
+        [ctxA.tenantId],
+      );
+    } finally {
+      await direct.end();
+    }
+
+    const warnSpy = vi.spyOn(console, 'warn').mockImplementation(() => {});
+    try {
+      const feeEarners = await pmsRepo.listFeeEarnersOnly(ctxA);
+      expect(feeEarners.length).toBeGreaterThan(0);
+      expect(feeEarners[0]?.annual_target_fees).toBeNull();
+      expect(feeEarners[0]?.annual_target_fees_pence).toBeNull();
+      expect(formatGbp(feeEarners[0]?.annual_target_fees)).toBe('Not available');
+
+      const corruptWarns = warnSpy.mock.calls
+        .map((c) => String(c[0] ?? ''))
+        .filter((msg) => msg.includes('pms.corrupt_money_text'));
+      expect(corruptWarns.length).toBe(1);
+      const parsedWarn = JSON.parse(corruptWarns[0]!);
+      expect(parsedWarn).toEqual({
+        event: 'pms.corrupt_money_text',
+        tenantId: ctxA.tenantId,
+        corruptCount: 1,
+      });
+      expect(corruptWarns[0]).not.toContain('CORRUPT_TEXT_SECRET_42');
+    } finally {
+      warnSpy.mockRestore();
+    }
+  });
+
+  it('R832 (Rule 9): rejects tampered cross-tenant matter/PMS record IDs and forged tenant claims on retainer and PMS pence reads', async () => {
+    const ctxA = makeTenantContext('tenant-a', 'P-000001');
+    const ctxB = makeTenantContext('tenant-b', 'P-000001');
+    const pmsRepo = getPmsRepository();
+    const matterRepo = getMatterRepository();
+    const baseStore = loadCommittedSeedStore();
+
+    await importFirmStoreModulesToPostgres({
+      ctx: ctxA,
+      store: baseStore,
+      tenantConfig: { ...getActiveTenantConfiguration(), tenantId: ctxA.tenantId },
+      modules: ['parties', 'matters', 'intake', 'quotes', 'tasks', 'hr', 'catalogues'],
+      clearFirst: true,
+    });
+    await importFirmStoreModulesToPostgres({
+      ctx: ctxB,
+      store: baseStore,
+      tenantConfig: { ...getActiveTenantConfiguration(), tenantId: ctxB.tenantId },
+      modules: ['parties', 'matters', 'intake', 'quotes', 'tasks', 'hr', 'catalogues'],
+      clearFirst: true,
+    });
+
+    const alphaSeedMatter = (
+      await matterRepo.listAllMattersUnfiltered<import('@/domain/types').Matter>(ctxA)
+    )[0]!;
+    const exclusiveMatterId = 'M-R832-A-ONLY';
+    await matterRepo.createMatter(ctxA, {
+      ...alphaSeedMatter,
+      id: exclusiveMatterId,
+      matterNumber: 'R832-A-ONLY-001',
+      title: 'R832 Alpha Exclusive Retainer Matter',
+      retainerMoniesOnAccountGbp: 4321.99,
+      retainerMoniesOnAccountPence: 432199 as import('@platform/core').MinorUnits,
+    });
+
+    const datasetA = buildSyntheticDataset({
+      suffix: 'A',
+      asAtDate: '2026-10-31',
+      wipAmount: 5555.25,
+      invoiceNet: 1200.5,
+      unlinkedWipAmount: 100,
+    });
+    const datasetB = buildSyntheticDataset({
+      suffix: 'B',
+      asAtDate: '2026-11-15',
+      wipAmount: 111.1,
+      invoiceNet: 200,
+      unlinkedWipAmount: 50,
+    });
+    await pmsRepo.clearTenantData(ctxA);
+    await pmsRepo.importExtractDataset(ctxA, datasetA);
+    await pmsRepo.clearTenantData(ctxB);
+    await pmsRepo.importExtractDataset(ctxB, datasetB);
+
+    // Positive control on Tenant A retainer pence and PMS pence reads
+    const alphaExclusive =
+      await matterRepo.getMatterById<import('@/domain/types').Matter>(
+        ctxA,
+        exclusiveMatterId,
+      );
+    expect(alphaExclusive?.retainerMoniesOnAccountPence).toBe(432199);
+    expect(alphaExclusive?.retainerMoniesOnAccountGbp).toBe(4321.99);
+    const alphaPmsMatter = await pmsRepo.getMatterFinancials(ctxA, 'MAT-A001');
+    expect(alphaPmsMatter?.unbilled_wip_pence).toBe(555525);
+
+    // 1. Tampered record ID: Tenant B reading Tenant A's exclusive matter & PMS rows gets nothing
+    expect(await matterRepo.getMatterById(ctxB, exclusiveMatterId)).toBeNull();
+    expect(await matterRepo.listMattersByIds(ctxB, [exclusiveMatterId])).toEqual([]);
+    expect(await pmsRepo.getMatterByCode(ctxB, 'MAT-A001')).toBeNull();
+    expect(await pmsRepo.getMatterFinancials(ctxB, 'MAT-A001')).toBeNull();
+    expect(await pmsRepo.getMatterFullBundle(ctxB, 'MAT-A001')).toBeNull();
+    expect(await pmsRepo.getClientAccountLedger(ctxB, 'MAT-A001')).toEqual([]);
+    expect(await pmsRepo.getInvoiceBalance(ctxB, 'INV-A1001')).toBeNull();
+    expect(await pmsRepo.getClientByCode(ctxB, 'CL-A001')).toBeNull();
+
+    // 2. Forged tenant claims on retainer and PMS pence reads are refused fail-closed
+    expect(() =>
+      resolveTenantFromVerifiedToken({
+        verifiedToken: {
+          __verifiedByOidcMiddleware: true,
+          sub: 'actor-b',
+          tenantId: ctxB.tenantId,
+          name: 'Actor B',
+          email: 'actor@tenant-b.example',
+          roles: ['admin', 'partner', 'finance'],
+          mfaVerified: true,
+        },
+        hostingMode: 'multi_tenant',
+        environment: 'test',
+        correlationId: 'corr-r832-forged-claim',
+        untrustedRequestTenantOverride: ctxA.tenantId,
+      }),
+    ).toThrow(/TENANCY_FORGERY_DETECTED/);
+
+    const forgedEmptyCtx = Object.freeze({
+      ...ctxA,
+      tenantId: '',
+    }) as unknown as TenantContext;
+    await expect(
+      matterRepo.getMatterById(forgedEmptyCtx, exclusiveMatterId),
+    ).rejects.toThrow(/TENANCY_ISOLATION_ERROR/);
+    await expect(pmsRepo.loadTenantPmsSnapshot(forgedEmptyCtx)).rejects.toThrow(
+      /TENANCY_ISOLATION_ERROR/,
+    );
+    await expect(
+      pmsRepo.getMatterFinancials(forgedEmptyCtx, 'MAT-A001'),
+    ).rejects.toThrow(/TENANCY_ISOLATION_ERROR/);
+    await expect(
+      pmsRepo.getClientAccountLedger(forgedEmptyCtx, 'MAT-A001'),
+    ).rejects.toThrow(/TENANCY_ISOLATION_ERROR/);
+
+    // Spoofing tenantId or postgresDatabaseName across tenants is refused fail-closed by PostgreSQL role permissions (42501)
+    const forgedCrossCtx = Object.freeze({
+      ...ctxB,
+      tenantId: ctxA.tenantId,
+    }) as TenantContext;
+    await expect(
+      matterRepo.getMatterById(forgedCrossCtx, exclusiveMatterId),
+    ).rejects.toThrow(/TENANCY_DATABASE_PERMISSION_DENIED/);
+    await expect(
+      pmsRepo.getMatterFinancials(forgedCrossCtx, 'MAT-A001'),
+    ).rejects.toThrow(/TENANCY_DATABASE_PERMISSION_DENIED/);
+    await expect(
+      pmsRepo.getClientAccountLedger(forgedCrossCtx, 'MAT-A001'),
+    ).rejects.toThrow(/TENANCY_DATABASE_PERMISSION_DENIED/);
+
+    const forgedDbCtx = Object.freeze({
+      ...ctxB,
+      postgresDatabaseName: ctxA.postgresDatabaseName,
+    }) as TenantContext;
+    await expect(
+      matterRepo.getMatterById(forgedDbCtx, exclusiveMatterId),
+    ).rejects.toThrow(/TENANCY_DATABASE_PERMISSION_DENIED/);
+    await expect(
+      pmsRepo.getMatterFinancials(forgedDbCtx, 'MAT-A001'),
+    ).rejects.toThrow(/TENANCY_DATABASE_PERMISSION_DENIED/);
+    await expect(
+      pmsRepo.getClientAccountLedger(forgedDbCtx, 'MAT-A001'),
+    ).rejects.toThrow(/TENANCY_DATABASE_PERMISSION_DENIED/);
+
+    // Forged Entra session claim targeting host service loaders refuses with TENANCY_FORGERY_DETECTED
+    const savedRawCfg = structuredClone(getActiveTenantRawBaseConfig());
+    setActiveTenantConfigForTesting(
+      {
+        ...(savedRawCfg as Record<string, unknown>),
+        tenantId: ctxA.tenantId,
+      },
+      { tenantId: ctxA.tenantId },
+    );
+    try {
+      const forgedCookie = createSignedEntraSessionCookie({
+        personId: 'P-000001',
+        tenantId: ctxB.tenantId,
+        oid: '00000000-0000-4000-8000-000000000001',
+        tid: '22222222-2222-3333-4444-000000000002',
+        sub: 'P-000001',
+        email: 'p1@tenant-b.example',
+        displayName: 'Forged Actor',
+        entraRoles: ['admin', 'partner', 'finance'],
+        mappedRoles: ['admin', 'partner', 'finance'],
+        entraGroups: [],
+        mfaVerified: true,
+        amr: ['pwd', 'mfa'],
+        authenticatedAt: new Date().toISOString(),
+        expiresAt: new Date(Date.now() + 3600_000).toISOString(),
+      });
+      const verifiedForged = verifySignedEntraSessionCookie(forgedCookie)!;
+      expect(() =>
+        resolveCurrentTenantContext(
+          createVerifiedSessionActorFromEntraSession(verifiedForged, {
+            correlationId: 'corr-r832-forged-session',
+          }),
+          getActiveTenantConfiguration(),
+        ),
+      ).toThrow(/TENANCY_FORGERY_DETECTED/);
+    } finally {
+      setActiveTenantConfigForTesting(savedRawCfg);
+    }
+  });
 });

@@ -35,7 +35,11 @@ export function isMatterOpenedViaOpeningGate(
 export function isMatterCmiIncompleteStatus(
   matter: Pick<
     Matter,
-    'matterStatusId' | 'amlStatus' | 'fieldValues' | 'isPmsImport'
+    | 'matterStatusId'
+    | 'amlStatus'
+    | 'fieldValues'
+    | 'isPmsImport'
+    | 'isLegacyCmiIncomplete'
   >,
   values: readonly Pick<ChoiceValue, 'id' | 'listKey' | 'systemKey'>[] = [],
 ): boolean {
@@ -46,6 +50,9 @@ export function isMatterCmiIncompleteStatus(
   if (sysKey === 'active') {
     if (isMatterOpenedViaOpeningGate(matter)) {
       return false;
+    }
+    if (typeof matter.isLegacyCmiIncomplete === 'boolean') {
+      return matter.isLegacyCmiIncomplete;
     }
     return matter.amlStatus === 'Pending' || matter.amlStatus === 'CMI incomplete';
   }
@@ -67,6 +74,7 @@ export function resolveMatterStatusPill(
     | 'conflictCheckStatus'
     | 'fieldValues'
     | 'isPmsImport'
+    | 'isLegacyCmiIncomplete'
   >,
   values: ChoiceValue[] = [],
 ): MatterStatusPillDisplay {

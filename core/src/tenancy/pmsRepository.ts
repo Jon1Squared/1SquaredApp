@@ -13,6 +13,15 @@
 
 import type { TenantContext } from '../api/index';
 import {
+  minorUnitsToPgBigInt,
+  minorUnitsToPounds,
+  pgBigIntToMinorUnits,
+  poundsToMinorUnits,
+  subtractMinorUnits,
+  sumMinorUnits,
+  type MinorUnits,
+} from '../domain/money/index';
+import {
   TenantScopedRepository,
   type TenantSqlClient,
 } from './tenantScopedRepository';
@@ -50,9 +59,103 @@ export function isValidTenantPmsAsAtDate(value: unknown): value is string {
   );
 }
 
-function round2(n: number): number {
+function roundHours2(n: number): number {
   return Math.round((Number(n || 0) + Number.EPSILON) * 100) / 100;
 }
+
+export function toSafeMinorUnits(n: unknown): MinorUnits | null {
+  if (n === null || n === undefined) return null;
+  if (typeof n === 'string') {
+    const trimmed = n.trim();
+    if (!trimmed) return null;
+    if (/^[-+]?\d+(?:\.\d+)?$/.test(trimmed)) {
+      try {
+        return poundsToMinorUnits(trimmed);
+      } catch {
+        return null;
+      }
+    }
+    if (/^[-+]?\d+(?:\.\d+)?[eE][-+]?\d+$/.test(trimmed)) {
+      const parsed = Number(trimmed);
+      if (Number.isFinite(parsed) && Math.abs(parsed) < 1e-9) {
+        return 0 as MinorUnits;
+      }
+      return null;
+    }
+    return null;
+  }
+  if (typeof n === 'number') {
+    if (!Number.isFinite(n)) return null;
+    if (/[eE]/.test(String(n))) {
+      if (Math.abs(n) < 1e-9) return 0 as MinorUnits;
+      return null;
+    }
+    try {
+      return poundsToMinorUnits(n);
+    } catch {
+      return null;
+    }
+  }
+  return null;
+}
+
+function parsePayloadMoneyPence(
+  text: unknown,
+  corruptTracker: { count: number },
+): MinorUnits | null {
+  if (text === null || text === undefined) return 0 as MinorUnits;
+  const trimmed = String(text).trim();
+  if (!trimmed) return 0 as MinorUnits;
+  const parsed = toSafeMinorUnits(trimmed);
+  if (parsed === null) {
+    corruptTracker.count += 1;
+    return null;
+  }
+  return parsed;
+}
+
+function warnIfCorruptMoneyText(
+  ctx: TenantContext,
+  corruptTracker: { count: number },
+): void {
+  if (corruptTracker.count > 0) {
+    console.warn(
+      JSON.stringify({
+        event: 'pms.corrupt_money_text',
+        tenantId: ctx.tenantId,
+        corruptCount: corruptTracker.count,
+      }),
+    );
+  }
+}
+
+function resolvePenceField(
+  pence: MinorUnits | null | undefined,
+  fallbackGbp: number | null | undefined,
+): MinorUnits {
+  if (typeof pence === 'number' && Number.isSafeInteger(pence)) {
+    return pence;
+  }
+  if (fallbackGbp === null || fallbackGbp === undefined) {
+    return 0 as MinorUnits;
+  }
+  return toSafeMinorUnits(fallbackGbp) ?? (0 as MinorUnits);
+}
+
+const PMS_FEE_EARNERS_SELECT =
+  "*, payload_json->>'annual_target_fees' AS payload_annual_target_fees_text";
+const PMS_CLIENTS_SELECT =
+  "*, payload_json->>'credit_limit' AS payload_credit_limit_text";
+const PMS_MATTERS_SELECT =
+  "*, payload_json->>'fixed_fee_amount' AS payload_fixed_fee_amount_text";
+const PMS_FEE_ESTIMATES_SELECT =
+  "*, payload_json->>'disbursements_estimate' AS payload_disbursements_estimate_text";
+const PMS_INVOICES_SELECT =
+  "*, payload_json->>'fees_net' AS payload_fees_net_text, payload_json->>'disbursements_net' AS payload_disbursements_net_text, payload_json->>'vat' AS payload_vat_text";
+const PMS_TIME_ENTRIES_SELECT =
+  "*, payload_json->>'rate' AS payload_rate_text, payload_json->>'billed_value' AS payload_billed_value_text, payload_json->>'write_off_value' AS payload_write_off_value_text";
+const PMS_DISBURSEMENTS_SELECT =
+  "*, payload_json->>'vat_amount' AS payload_vat_amount_text, payload_json->>'gross_amount' AS payload_gross_amount_text";
 
 function daysBetweenIsoDates(laterIso: string, earlierIso: string): number {
   const t1 = Date.parse(`${laterIso.slice(0, 10)}T00:00:00Z`);
@@ -115,8 +218,10 @@ export interface TenantPmsFeeEarner {
   grade: string;
   department: string;
   standard_hourly_rate: number;
+  standard_hourly_rate_pence?: MinorUnits;
   annual_target_hours: number;
-  annual_target_fees: number;
+  annual_target_fees: number | null;
+  annual_target_fees_pence?: MinorUnits | null;
   active: string;
 }
 
@@ -131,7 +236,8 @@ export interface TenantPmsClient {
   postcode: string;
   client_partner_id: string;
   credit_terms_days: number;
-  credit_limit: number;
+  credit_limit: number | null;
+  credit_limit_pence?: MinorUnits | null;
   rate_discount_pct: number;
   date_opened: string;
   sector: string;
@@ -152,8 +258,10 @@ export interface TenantPmsMatter {
     | 'Fixed Fee'
     | 'Capped Fee'
     | 'Retainer / Subscription';
-  fixed_fee_amount: number;
+  fixed_fee_amount: number | null;
+  fixed_fee_amount_pence?: MinorUnits | null;
   fee_estimate: number;
+  fee_estimate_pence?: MinorUnits;
   estimate_alert_pct: number;
   date_opened: string;
   date_closed: string | null;
@@ -169,7 +277,9 @@ export interface TenantPmsFeeEstimate {
   date_given: string;
   estimate_type: 'Initial' | 'Revised';
   fees_estimate: number;
-  disbursements_estimate: number;
+  fees_estimate_pence?: MinorUnits;
+  disbursements_estimate: number | null;
+  disbursements_estimate_pence?: MinorUnits | null;
   given_by: string;
   given_by_name?: string;
   accepted_by_client: 'Yes' | 'No' | 'Pending';
@@ -188,13 +298,17 @@ export interface TenantPmsTimeEntry {
   minutes: number;
   units: number;
   hours: number;
-  rate: number;
+  rate: number | null;
+  rate_pence?: MinorUnits | null;
   value: number;
+  value_pence?: MinorUnits;
   chargeable: 'Y' | 'N';
   billed_status: 'Unbilled' | 'Billed' | 'Written off' | 'Non-chargeable';
   invoice_number: string | null;
-  billed_value: number;
-  write_off_value: number;
+  billed_value: number | null;
+  billed_value_pence?: MinorUnits | null;
+  write_off_value: number | null;
+  write_off_value_pence?: MinorUnits | null;
 }
 
 export interface TenantPmsDisbursement {
@@ -205,8 +319,11 @@ export interface TenantPmsDisbursement {
   supplier: string;
   description: string;
   net_amount: number;
-  vat_amount: number;
-  gross_amount: number;
+  net_amount_pence?: MinorUnits;
+  vat_amount: number | null;
+  vat_amount_pence?: MinorUnits | null;
+  gross_amount: number | null;
+  gross_amount_pence?: MinorUnits | null;
   paid_from: 'Office' | 'Client account';
   billed_status: 'Unbilled' | 'Billed';
   invoice_number: string | null;
@@ -234,6 +351,7 @@ export interface TenantPmsPayment {
   client_code: string;
   receipt_date: string;
   amount: number;
+  amount_pence?: MinorUnits;
   method: string;
   reference: string;
 }
@@ -247,10 +365,14 @@ export interface TenantPmsInvoiceRow {
   invoice_type: string;
   period_from: string | null;
   period_to: string | null;
-  fees_net: number;
-  disbursements_net: number;
-  vat: number;
+  fees_net: number | null;
+  fees_net_pence?: MinorUnits | null;
+  disbursements_net: number | null;
+  disbursements_net_pence?: MinorUnits | null;
+  vat: number | null;
+  vat_pence?: MinorUnits | null;
   total: number;
+  total_pence?: MinorUnits;
   status: string;
   credit_note_for: string | null;
 }
@@ -264,15 +386,22 @@ export interface TenantPmsInvoiceBalance {
   invoice_type: string;
   period_from: string | null;
   period_to: string | null;
-  fees_net: number;
-  disbursements_net: number;
-  vat: number;
+  fees_net: number | null;
+  fees_net_pence?: MinorUnits | null;
+  disbursements_net: number | null;
+  disbursements_net_pence?: MinorUnits | null;
+  vat: number | null;
+  vat_pence?: MinorUnits | null;
   total: number;
+  total_pence?: MinorUnits;
   exported_status: string;
   credit_note_for: string | null;
   paid: number;
+  paid_pence?: MinorUnits;
   credit_notes: number;
+  credit_notes_pence?: MinorUnits;
   outstanding: number;
+  outstanding_pence?: MinorUnits;
   days_past_due: number | null;
   age_bucket: TenantPmsAgeBucket;
   recalculated_status: TenantPmsRecalculatedInvoiceStatus;
@@ -293,7 +422,9 @@ export interface TenantPmsClientAccountEntry {
   type: 'Receipt' | 'Payment' | 'Transfer to office';
   description: string;
   amount: number;
+  amount_pence?: MinorUnits;
   running_balance: number;
+  running_balance_pence?: MinorUnits;
 }
 
 export interface TenantPmsMatterFinancials {
@@ -313,6 +444,7 @@ export interface TenantPmsMatterFinancials {
     | 'Capped Fee'
     | 'Retainer / Subscription';
   fixed_fee_amount: number;
+  fixed_fee_amount_pence?: MinorUnits;
   estimate_alert_pct: number;
   date_opened: string;
   date_closed: string | null;
@@ -321,17 +453,28 @@ export interface TenantPmsMatterFinancials {
   client_reference: string;
   third_party_payer: string;
   fee_estimate: number;
+  fee_estimate_pence?: MinorUnits;
   time_value_recorded: number;
+  time_value_recorded_pence?: MinorUnits;
   unbilled_wip: number;
+  unbilled_wip_pence?: MinorUnits;
   fees_billed: number;
+  fees_billed_pence?: MinorUnits;
   disbursements_billed: number;
+  disbursements_billed_pence?: MinorUnits;
   total_invoiced_inc_vat: number;
+  total_invoiced_inc_vat_pence?: MinorUnits;
   total_paid: number;
+  total_paid_pence?: MinorUnits;
   outstanding_debt: number;
+  outstanding_debt_pence?: MinorUnits;
   unbilled_disbursements: number;
+  unbilled_disbursements_pence?: MinorUnits;
   estimate_used_pct: number;
   written_off: number;
+  written_off_pence?: MinorUnits;
   client_account_balance: number;
+  client_account_balance_pence?: MinorUnits;
   has_pending_estimate_revision: boolean;
   oldest_unbilled_wip_days: number | null;
   max_invoice_days_past_due: number | null;
@@ -345,12 +488,17 @@ export interface TenantPmsMatterWipBreakdown {
     grade: string;
     hours: number;
     wip_value: number;
+    wip_value_pence?: MinorUnits;
   }[];
   byAgeBucket: {
     bucket_0_30: number;
+    bucket_0_30_pence?: MinorUnits;
     bucket_31_60: number;
+    bucket_31_60_pence?: MinorUnits;
     bucket_61_90: number;
+    bucket_61_90_pence?: MinorUnits;
     bucket_90_plus: number;
+    bucket_90_plus_pence?: MinorUnits;
   };
 }
 
@@ -519,52 +667,61 @@ export function computeDerivedInvoiceBalances(params: {
   const validAsAt = isValidTenantPmsAsAtDate(params.asAtDate)
     ? params.asAtDate.trim()
     : '';
-  const paidPenceByInv = new Map<string, number>();
+  const paidPenceByInv = new Map<string, MinorUnits>();
   for (const p of params.payments) {
     paidPenceByInv.set(
       p.invoice_number,
-      (paidPenceByInv.get(p.invoice_number) ?? 0) + Math.round(p.amount * 100),
+      sumMinorUnits([
+        paidPenceByInv.get(p.invoice_number) ?? (0 as MinorUnits),
+        resolvePenceField(p.amount_pence, p.amount),
+      ]),
     );
   }
 
-  const cnPenceByInv = new Map<string, number>();
+  const cnPenceByInv = new Map<string, MinorUnits>();
   for (const inv of params.invoices) {
     if (inv.credit_note_for && inv.credit_note_for.trim()) {
       const target = inv.credit_note_for.trim();
       cnPenceByInv.set(
         target,
-        (cnPenceByInv.get(target) ?? 0) + Math.round(inv.total * 100),
+        sumMinorUnits([
+          cnPenceByInv.get(target) ?? (0 as MinorUnits),
+          resolvePenceField(inv.total_pence, inv.total),
+        ]),
       );
     }
   }
 
   const balances: TenantPmsInvoiceBalance[] = params.invoices.map((inv) => {
-    const paid = round2((paidPenceByInv.get(inv.invoice_number) ?? 0) / 100);
-    const creditNotes = round2(
-      (cnPenceByInv.get(inv.invoice_number) ?? 0) / 100,
+    const paidPence = paidPenceByInv.get(inv.invoice_number) ?? (0 as MinorUnits);
+    const creditNotesPence = cnPenceByInv.get(inv.invoice_number) ?? (0 as MinorUnits);
+    const feesNetPence = resolvePenceField(inv.fees_net_pence, inv.fees_net);
+    const disbursementsNetPence = resolvePenceField(
+      inv.disbursements_net_pence,
+      inv.disbursements_net,
     );
+    const vatPence = resolvePenceField(inv.vat_pence, inv.vat);
+    const totalPence = resolvePenceField(inv.total_pence, inv.total);
+    const paid = minorUnitsToPounds(paidPence);
+    const creditNotes = minorUnitsToPounds(creditNotesPence);
     const isCreditNote = inv.invoice_type === 'Credit note';
-    const outstanding = isCreditNote
-      ? 0
-      : round2(
-          (Math.round(inv.total * 100) -
-            Math.round(paid * 100) +
-            Math.round(creditNotes * 100)) /
-            100,
-        );
+    const outstandingPence = isCreditNote
+      ? (0 as MinorUnits)
+      : sumMinorUnits([subtractMinorUnits(totalPence, paidPence), creditNotesPence]);
+    const outstanding = minorUnitsToPounds(outstandingPence);
 
     const diffDays = validAsAt
       ? daysBetweenIsoDates(validAsAt, inv.due_date)
       : 0;
     const daysPastDue =
-      isCreditNote || outstanding <= 0.005 || !validAsAt
+      isCreditNote || outstandingPence <= 0 || !validAsAt
         ? null
         : diffDays < 0
           ? 0
           : diffDays;
 
     let ageBucket: TenantPmsAgeBucket;
-    if (isCreditNote || outstanding <= 0.005) {
+    if (isCreditNote || outstandingPence <= 0) {
       ageBucket = 'Settled';
     } else if (diffDays <= 0) {
       ageBucket = 'Not yet due';
@@ -581,9 +738,9 @@ export function computeDerivedInvoiceBalances(params: {
     let recalculatedStatus: TenantPmsRecalculatedInvoiceStatus;
     if (isCreditNote) {
       recalculatedStatus = 'Applied';
-    } else if (outstanding <= 0.005) {
+    } else if (outstandingPence <= 0) {
       recalculatedStatus = 'Paid';
-    } else if (paid > 0.005) {
+    } else if (paidPence > 0) {
       recalculatedStatus = 'Part paid';
     } else if (diffDays > 0) {
       recalculatedStatus = 'Overdue';
@@ -600,15 +757,22 @@ export function computeDerivedInvoiceBalances(params: {
       invoice_type: inv.invoice_type,
       period_from: inv.period_from ?? null,
       period_to: inv.period_to ?? null,
-      fees_net: round2(inv.fees_net),
-      disbursements_net: round2(inv.disbursements_net),
-      vat: round2(inv.vat),
-      total: round2(inv.total),
+      fees_net: minorUnitsToPounds(feesNetPence),
+      fees_net_pence: feesNetPence,
+      disbursements_net: minorUnitsToPounds(disbursementsNetPence),
+      disbursements_net_pence: disbursementsNetPence,
+      vat: minorUnitsToPounds(vatPence),
+      vat_pence: vatPence,
+      total: minorUnitsToPounds(totalPence),
+      total_pence: totalPence,
       exported_status: inv.status,
       credit_note_for: inv.credit_note_for ?? null,
       paid,
+      paid_pence: paidPence,
       credit_notes: creditNotes,
+      credit_notes_pence: creditNotesPence,
       outstanding,
+      outstanding_pence: outstandingPence,
       days_past_due: daysPastDue,
       age_bucket: ageBucket,
       recalculated_status: recalculatedStatus,
@@ -633,10 +797,16 @@ export function computeDerivedMatterFinancials(params: {
   invoiceBalances: readonly TenantPmsInvoiceBalance[];
   timeEntries: readonly TenantPmsTimeEntry[];
   disbursements: readonly TenantPmsDisbursement[];
-  clientAccount: readonly Pick<
+  clientAccount: readonly (Pick<
     TenantPmsClientAccountEntry,
     'matter_code' | 'amount'
-  >[];
+  > &
+    Partial<
+      Pick<
+        TenantPmsClientAccountEntry,
+        'amount_pence' | 'running_balance' | 'running_balance_pence' | 'date' | 'transaction_id'
+      >
+    >)[];
 }): TenantPmsMatterFinancials[] {
   const validAsAt = isValidTenantPmsAsAtDate(params.asAtDate)
     ? params.asAtDate.trim()
@@ -672,12 +842,39 @@ export function computeDerivedMatterFinancials(params: {
     disbByMatter.set(d.matter_code, list);
   }
 
-  const caPenceByMatter = new Map<string, number>();
+  // Prefer persisted running_balance_pence (`balance_after_pence`) on the latest entry
+  // per matter; only accumulate amount_pence when importing fresh entries with no balance_after.
+  const caEntriesByMatter = new Map<
+    string,
+    (typeof params.clientAccount)[number][]
+  >();
   for (const ca of params.clientAccount) {
-    caPenceByMatter.set(
-      ca.matter_code,
-      (caPenceByMatter.get(ca.matter_code) ?? 0) + Math.round(ca.amount * 100),
-    );
+    const list = caEntriesByMatter.get(ca.matter_code) ?? [];
+    list.push(ca);
+    caEntriesByMatter.set(ca.matter_code, list);
+  }
+  const caPenceByMatter = new Map<string, MinorUnits>();
+  for (const [mCode, entries] of caEntriesByMatter.entries()) {
+    const lastEntry = entries[entries.length - 1];
+    if (
+      lastEntry &&
+      typeof lastEntry.running_balance_pence === 'number' &&
+      Number.isSafeInteger(lastEntry.running_balance_pence)
+    ) {
+      caPenceByMatter.set(mCode, lastEntry.running_balance_pence);
+    } else if (lastEntry && typeof lastEntry.running_balance === 'number') {
+      caPenceByMatter.set(
+        mCode,
+        toSafeMinorUnits(lastEntry.running_balance) ?? (0 as MinorUnits),
+      );
+    } else {
+      caPenceByMatter.set(
+        mCode,
+        sumMinorUnits(
+          entries.map((ca) => resolvePenceField(ca.amount_pence, ca.amount)),
+        ),
+      );
+    }
   }
 
   const sortedMatters = [...params.matters].sort((a, b) =>
@@ -697,25 +894,34 @@ export function computeDerivedMatterFinancials(params: {
       },
     );
     const latestEst = mEstimates[0];
-    const feeEstimate = round2(
-      latestEst ? latestEst.fees_estimate : m.fee_estimate,
+    const feeEstimatePence = latestEst
+      ? resolvePenceField(latestEst.fees_estimate_pence, latestEst.fees_estimate)
+      : resolvePenceField(m.fee_estimate_pence, m.fee_estimate);
+    const feeEstimate = minorUnitsToPounds(feeEstimatePence);
+    const fixedFeeAmountPence = resolvePenceField(
+      m.fixed_fee_amount_pence,
+      m.fixed_fee_amount,
     );
     const hasPendingRevision = mEstimates.some(
       (e) => e.accepted_by_client === 'Pending',
     );
 
     const mTimes = timeByMatter.get(m.matter_code) ?? [];
-    let timeRecordedPence = 0;
-    let unbilledWipPence = 0;
-    let writtenOffPence = 0;
+    let timeRecordedPence = 0 as MinorUnits;
+    let unbilledWipPence = 0 as MinorUnits;
+    let writtenOffPence = 0 as MinorUnits;
     let oldestUnbilledWipDays: number | null = null;
 
     for (const te of mTimes) {
-      timeRecordedPence += Math.round(te.value * 100);
-      writtenOffPence += Math.round(te.write_off_value * 100);
+      const valPence = resolvePenceField(te.value_pence, te.value);
+      timeRecordedPence = sumMinorUnits([timeRecordedPence, valPence]);
+      writtenOffPence = sumMinorUnits([
+        writtenOffPence,
+        resolvePenceField(te.write_off_value_pence, te.write_off_value),
+      ]);
       if (te.billed_status === 'Unbilled') {
-        unbilledWipPence += Math.round(te.value * 100);
-        if (te.value > 0 && validAsAt) {
+        unbilledWipPence = sumMinorUnits([unbilledWipPence, valPence]);
+        if (valPence > 0 && validAsAt) {
           const age = daysBetweenIsoDates(validAsAt, te.date);
           if (oldestUnbilledWipDays === null || age > oldestUnbilledWipDays) {
             oldestUnbilledWipDays = age;
@@ -724,23 +930,39 @@ export function computeDerivedMatterFinancials(params: {
       }
     }
 
-    const timeValueRecorded = round2(timeRecordedPence / 100);
-    const unbilledWip = round2(unbilledWipPence / 100);
-    const writtenOff = round2(writtenOffPence / 100);
+    const timeValueRecorded = minorUnitsToPounds(timeRecordedPence);
+    const unbilledWip = minorUnitsToPounds(unbilledWipPence);
+    const writtenOff = minorUnitsToPounds(writtenOffPence);
 
     const mInvoices = invByMatter.get(m.matter_code) ?? [];
-    let feesBilledPence = 0;
-    let disbBilledPence = 0;
-    let totalInvoicedPence = 0;
-    let totalPaidPence = 0;
+    let feesBilledPence = 0 as MinorUnits;
+    let disbBilledPence = 0 as MinorUnits;
+    let totalInvoicedPence = 0 as MinorUnits;
+    let totalPaidPence = 0 as MinorUnits;
     let maxInvoiceDaysPastDue: number | null = null;
 
     for (const ib of mInvoices) {
-      feesBilledPence += Math.round(ib.fees_net * 100);
-      disbBilledPence += Math.round(ib.disbursements_net * 100);
-      totalInvoicedPence += Math.round(ib.total * 100);
-      totalPaidPence += Math.round(ib.paid * 100);
-      if (ib.outstanding > 0.005 && ib.days_past_due !== null) {
+      feesBilledPence = sumMinorUnits([
+        feesBilledPence,
+        resolvePenceField(ib.fees_net_pence, ib.fees_net),
+      ]);
+      disbBilledPence = sumMinorUnits([
+        disbBilledPence,
+        resolvePenceField(ib.disbursements_net_pence, ib.disbursements_net),
+      ]);
+      totalInvoicedPence = sumMinorUnits([
+        totalInvoicedPence,
+        resolvePenceField(ib.total_pence, ib.total),
+      ]);
+      totalPaidPence = sumMinorUnits([
+        totalPaidPence,
+        resolvePenceField(ib.paid_pence, ib.paid),
+      ]);
+      const outstandingInvPence = resolvePenceField(
+        ib.outstanding_pence,
+        ib.outstanding,
+      );
+      if (outstandingInvPence > 0 && ib.days_past_due !== null) {
         if (
           maxInvoiceDaysPastDue === null ||
           ib.days_past_due > maxInvoiceDaysPastDue
@@ -750,28 +972,33 @@ export function computeDerivedMatterFinancials(params: {
       }
     }
 
-    const feesBilled = round2(feesBilledPence / 100);
-    const disbursementsBilled = round2(disbBilledPence / 100);
-    const totalInvoicedIncVat = round2(totalInvoicedPence / 100);
-    const totalPaid = round2(totalPaidPence / 100);
-    const outstandingDebt = round2(
-      (Math.round(totalInvoicedIncVat * 100) - Math.round(totalPaid * 100)) /
-        100,
+    const feesBilled = minorUnitsToPounds(feesBilledPence);
+    const disbursementsBilled = minorUnitsToPounds(disbBilledPence);
+    const totalInvoicedIncVat = minorUnitsToPounds(totalInvoicedPence);
+    const totalPaid = minorUnitsToPounds(totalPaidPence);
+    const outstandingDebtPence = subtractMinorUnits(
+      totalInvoicedPence,
+      totalPaidPence,
     );
+    const outstandingDebt = minorUnitsToPounds(outstandingDebtPence);
 
     const mDisbs = disbByMatter.get(m.matter_code) ?? [];
-    let unbilledDisbPence = 0;
+    let unbilledDisbPence = 0 as MinorUnits;
     for (const d of mDisbs) {
       if (d.billed_status === 'Unbilled') {
-        unbilledDisbPence += Math.round(d.net_amount * 100);
+        unbilledDisbPence = sumMinorUnits([
+          unbilledDisbPence,
+          resolvePenceField(d.net_amount_pence, d.net_amount),
+        ]);
       }
     }
-    const unbilledDisbursements = round2(unbilledDisbPence / 100);
-    const clientAccountBalance = round2(
-      (caPenceByMatter.get(m.matter_code) ?? 0) / 100,
-    );
+    const unbilledDisbursements = minorUnitsToPounds(unbilledDisbPence);
+    const clientAccountPence = caPenceByMatter.get(m.matter_code) ?? (0 as MinorUnits);
+    const clientAccountBalance = minorUnitsToPounds(clientAccountPence);
     const estimateUsedPct =
-      feeEstimate > 0 ? (feesBilled + unbilledWip) / feeEstimate : 0;
+      feeEstimatePence > 0
+        ? sumMinorUnits([feesBilledPence, unbilledWipPence]) / feeEstimatePence
+        : 0;
 
     return {
       matter_code: m.matter_code,
@@ -785,7 +1012,8 @@ export function computeDerivedMatterFinancials(params: {
       fee_earner_id: m.fee_earner_id,
       fee_earner_name: fe ? `${fe.first_name} ${fe.last_name}` : '',
       billing_basis: m.billing_basis,
-      fixed_fee_amount: round2(m.fixed_fee_amount),
+      fixed_fee_amount: minorUnitsToPounds(fixedFeeAmountPence),
+      fixed_fee_amount_pence: fixedFeeAmountPence,
       estimate_alert_pct: Number(m.estimate_alert_pct ?? 0.75),
       date_opened: m.date_opened,
       date_closed: m.date_closed ?? null,
@@ -794,17 +1022,28 @@ export function computeDerivedMatterFinancials(params: {
       client_reference: m.client_reference ?? '',
       third_party_payer: m.third_party_payer ?? '',
       fee_estimate: feeEstimate,
+      fee_estimate_pence: feeEstimatePence,
       time_value_recorded: timeValueRecorded,
+      time_value_recorded_pence: timeRecordedPence,
       unbilled_wip: unbilledWip,
+      unbilled_wip_pence: unbilledWipPence,
       fees_billed: feesBilled,
+      fees_billed_pence: feesBilledPence,
       disbursements_billed: disbursementsBilled,
+      disbursements_billed_pence: disbBilledPence,
       total_invoiced_inc_vat: totalInvoicedIncVat,
+      total_invoiced_inc_vat_pence: totalInvoicedPence,
       total_paid: totalPaid,
+      total_paid_pence: totalPaidPence,
       outstanding_debt: outstandingDebt,
+      outstanding_debt_pence: outstandingDebtPence,
       unbilled_disbursements: unbilledDisbursements,
+      unbilled_disbursements_pence: unbilledDisbPence,
       estimate_used_pct: estimateUsedPct,
       written_off: writtenOff,
+      written_off_pence: writtenOffPence,
       client_account_balance: clientAccountBalance,
+      client_account_balance_pence: clientAccountPence,
       has_pending_estimate_revision: hasPendingRevision,
       oldest_unbilled_wip_days: oldestUnbilledWipDays,
       max_invoice_days_past_due: maxInvoiceDaysPastDue,
@@ -831,14 +1070,14 @@ export function computeDerivedMatterWipBreakdown(params: {
       initials: string;
       grade: string;
       hoursHund: number;
-      wipPence: number;
+      wipPence: MinorUnits;
     }
   >();
 
-  let bucket0_30Pence = 0;
-  let bucket31_60Pence = 0;
-  let bucket61_90Pence = 0;
-  let bucket90PlusPence = 0;
+  let bucket0_30Pence = 0 as MinorUnits;
+  let bucket31_60Pence = 0 as MinorUnits;
+  let bucket61_90Pence = 0 as MinorUnits;
+  let bucket90PlusPence = 0 as MinorUnits;
 
   for (const te of params.timeEntries) {
     if (te.matter_code !== params.matterCode || te.billed_status !== 'Unbilled') {
@@ -851,22 +1090,22 @@ export function computeDerivedMatterWipBreakdown(params: {
       initials: fe?.initials ?? te.fee_earner_initials ?? '',
       grade: fe?.grade ?? '',
       hoursHund: 0,
-      wipPence: 0,
+      wipPence: 0 as MinorUnits,
     };
+    const valPence = resolvePenceField(te.value_pence, te.value);
     existing.hoursHund += Math.round(te.hours * 100);
-    existing.wipPence += Math.round(te.value * 100);
+    existing.wipPence = sumMinorUnits([existing.wipPence, valPence]);
     feAgg.set(te.fee_earner_id, existing);
 
-    const valPence = Math.round(te.value * 100);
     const ageDays = validAsAt ? daysBetweenIsoDates(validAsAt, te.date) : 0;
     if (ageDays <= 30) {
-      bucket0_30Pence += valPence;
+      bucket0_30Pence = sumMinorUnits([bucket0_30Pence, valPence]);
     } else if (ageDays <= 60) {
-      bucket31_60Pence += valPence;
+      bucket31_60Pence = sumMinorUnits([bucket31_60Pence, valPence]);
     } else if (ageDays <= 90) {
-      bucket61_90Pence += valPence;
+      bucket61_90Pence = sumMinorUnits([bucket61_90Pence, valPence]);
     } else {
-      bucket90PlusPence += valPence;
+      bucket90PlusPence = sumMinorUnits([bucket90PlusPence, valPence]);
     }
   }
 
@@ -876,8 +1115,9 @@ export function computeDerivedMatterWipBreakdown(params: {
       name: item.name,
       initials: item.initials,
       grade: item.grade,
-      hours: round2(item.hoursHund / 100),
-      wip_value: round2(item.wipPence / 100),
+      hours: roundHours2(item.hoursHund / 100),
+      wip_value: minorUnitsToPounds(item.wipPence),
+      wip_value_pence: item.wipPence,
     }))
     .sort((a, b) => {
       if (b.wip_value !== a.wip_value) return b.wip_value - a.wip_value;
@@ -887,10 +1127,14 @@ export function computeDerivedMatterWipBreakdown(params: {
   return {
     byFeeEarner,
     byAgeBucket: {
-      bucket_0_30: round2(bucket0_30Pence / 100),
-      bucket_31_60: round2(bucket31_60Pence / 100),
-      bucket_61_90: round2(bucket61_90Pence / 100),
-      bucket_90_plus: round2(bucket90PlusPence / 100),
+      bucket_0_30: minorUnitsToPounds(bucket0_30Pence),
+      bucket_0_30_pence: bucket0_30Pence,
+      bucket_31_60: minorUnitsToPounds(bucket31_60Pence),
+      bucket_31_60_pence: bucket31_60Pence,
+      bucket_61_90: minorUnitsToPounds(bucket61_90Pence),
+      bucket_61_90_pence: bucket61_90Pence,
+      bucket_90_plus: minorUnitsToPounds(bucket90PlusPence),
+      bucket_90_plus_pence: bucket90PlusPence,
     },
   };
 }
@@ -1475,22 +1719,30 @@ export class TenantPmsRepository extends TenantScopedRepository {
           'department',
           'office',
           'charge_out_rate',
+          'charge_out_rate_pence',
           'status',
           'payload_json',
         ],
         dataset.feeEarners,
-        (fe) => [
-          ctx.tenantId,
-          fe.fee_earner_id,
-          `${fe.first_name} ${fe.last_name}`.trim(),
-          fe.grade,
-          fe.department,
-          'London',
-          round2(fe.standard_hourly_rate),
-          fe.active || 'Yes',
-          JSON.stringify(fe),
-        ],
-        { 8: '::jsonb' },
+        (fe) => {
+          const ratePence = resolvePenceField(
+            fe.standard_hourly_rate_pence,
+            fe.standard_hourly_rate,
+          );
+          return [
+            ctx.tenantId,
+            fe.fee_earner_id,
+            `${fe.first_name} ${fe.last_name}`.trim(),
+            fe.grade,
+            fe.department,
+            'London',
+            minorUnitsToPounds(ratePence),
+            minorUnitsToPgBigInt(ratePence),
+            fe.active || 'Yes',
+            JSON.stringify(fe),
+          ];
+        },
+        { 7: '::bigint', 9: '::jsonb' },
       );
 
       await this.batchInsertRowsInTx(
@@ -1530,29 +1782,37 @@ export class TenantPmsRepository extends TenantScopedRepository {
           'acting_fee_earner_id',
           'billing_basis',
           'fee_estimate',
+          'fee_estimate_pence',
           'matter_status',
           'open_date',
           'close_date',
           'payload_json',
         ],
         dataset.matters,
-        (matter) => [
-          ctx.tenantId,
-          matter.matter_code,
-          matter.client_code,
-          matter.matter_description,
-          matter.practice_area,
-          matter.work_type,
-          matter.responsible_partner_id,
-          matter.fee_earner_id,
-          matter.billing_basis,
-          round2(matter.fee_estimate),
-          matter.status,
-          matter.date_opened || null,
-          matter.date_closed || null,
-          JSON.stringify(matter),
-        ],
-        { 13: '::jsonb' },
+        (matter) => {
+          const estPence = resolvePenceField(
+            matter.fee_estimate_pence,
+            matter.fee_estimate,
+          );
+          return [
+            ctx.tenantId,
+            matter.matter_code,
+            matter.client_code,
+            matter.matter_description,
+            matter.practice_area,
+            matter.work_type,
+            matter.responsible_partner_id,
+            matter.fee_earner_id,
+            matter.billing_basis,
+            minorUnitsToPounds(estPence),
+            minorUnitsToPgBigInt(estPence),
+            matter.status,
+            matter.date_opened || null,
+            matter.date_closed || null,
+            JSON.stringify(matter),
+          ];
+        },
+        { 10: '::bigint', 14: '::jsonb' },
       );
 
       const wipHoursByMatter = new Map<string, number>();
@@ -1583,26 +1843,78 @@ export class TenantPmsRepository extends TenantScopedRepository {
           'open_date',
           'close_date',
           'current_fee_estimate',
+          'current_fee_estimate_pence',
           'wip_hours',
           'wip_value',
+          'wip_value_pence',
           'total_time_value',
+          'total_time_value_pence',
           'billed_fees_ex_vat',
+          'billed_fees_ex_vat_pence',
           'billed_disb_ex_vat',
+          'billed_disb_ex_vat_pence',
           'billed_vat',
+          'billed_vat_pence',
           'billed_total_inc_vat',
+          'billed_total_inc_vat_pence',
           'cash_received',
+          'cash_received_pence',
           'outstanding_debt',
+          'outstanding_debt_pence',
           'unbilled_disbursements',
+          'unbilled_disbursements_pence',
           'client_account_balance',
+          'client_account_balance_pence',
           'payload_json',
         ],
         matterFinancials,
         (mf) => {
-          const wipHours = round2(
+          const wipHours = roundHours2(
             (wipHoursByMatter.get(mf.matter_code) ?? 0) / 100,
           );
-          const billedVat = round2(
-            mf.total_invoiced_inc_vat - mf.fees_billed - mf.disbursements_billed,
+          const feeEstimatePence = resolvePenceField(
+            mf.fee_estimate_pence,
+            mf.fee_estimate,
+          );
+          const unbilledWipPence = resolvePenceField(
+            mf.unbilled_wip_pence,
+            mf.unbilled_wip,
+          );
+          const timeRecordedPence = resolvePenceField(
+            mf.time_value_recorded_pence,
+            mf.time_value_recorded,
+          );
+          const feesBilledPence = resolvePenceField(
+            mf.fees_billed_pence,
+            mf.fees_billed,
+          );
+          const disbBilledPence = resolvePenceField(
+            mf.disbursements_billed_pence,
+            mf.disbursements_billed,
+          );
+          const totalInvoicedPence = resolvePenceField(
+            mf.total_invoiced_inc_vat_pence,
+            mf.total_invoiced_inc_vat,
+          );
+          const billedVatPence = subtractMinorUnits(
+            subtractMinorUnits(totalInvoicedPence, feesBilledPence),
+            disbBilledPence,
+          );
+          const totalPaidPence = resolvePenceField(
+            mf.total_paid_pence,
+            mf.total_paid,
+          );
+          const outstandingDebtPence = resolvePenceField(
+            mf.outstanding_debt_pence,
+            mf.outstanding_debt,
+          );
+          const unbilledDisbPence = resolvePenceField(
+            mf.unbilled_disbursements_pence,
+            mf.unbilled_disbursements,
+          );
+          const clientAccountPence = resolvePenceField(
+            mf.client_account_balance_pence,
+            mf.client_account_balance,
           );
           return [
             ctx.tenantId,
@@ -1618,21 +1930,45 @@ export class TenantPmsRepository extends TenantScopedRepository {
             mf.date_opened || null,
             mf.date_closed || null,
             mf.fee_estimate,
+            minorUnitsToPgBigInt(feeEstimatePence),
             wipHours,
             mf.unbilled_wip,
+            minorUnitsToPgBigInt(unbilledWipPence),
             mf.time_value_recorded,
+            minorUnitsToPgBigInt(timeRecordedPence),
             mf.fees_billed,
+            minorUnitsToPgBigInt(feesBilledPence),
             mf.disbursements_billed,
-            billedVat,
+            minorUnitsToPgBigInt(disbBilledPence),
+            minorUnitsToPounds(billedVatPence),
+            minorUnitsToPgBigInt(billedVatPence),
             mf.total_invoiced_inc_vat,
+            minorUnitsToPgBigInt(totalInvoicedPence),
             mf.total_paid,
+            minorUnitsToPgBigInt(totalPaidPence),
             mf.outstanding_debt,
+            minorUnitsToPgBigInt(outstandingDebtPence),
             mf.unbilled_disbursements,
+            minorUnitsToPgBigInt(unbilledDisbPence),
             mf.client_account_balance,
+            minorUnitsToPgBigInt(clientAccountPence),
             JSON.stringify(mf),
           ];
         },
-        { 24: '::jsonb' },
+        {
+          13: '::bigint',
+          16: '::bigint',
+          18: '::bigint',
+          20: '::bigint',
+          22: '::bigint',
+          24: '::bigint',
+          26: '::bigint',
+          28: '::bigint',
+          30: '::bigint',
+          32: '::bigint',
+          34: '::bigint',
+          35: '::jsonb',
+        },
       );
 
       const estVersionByMatter = new Map<string, number>();
@@ -1646,23 +1982,29 @@ export class TenantPmsRepository extends TenantScopedRepository {
           'version',
           'estimate_date',
           'estimated_fees_ex_vat',
+          'estimated_fees_ex_vat_pence',
           'payload_json',
         ],
         dataset.feeEstimates,
         (est) => {
           const nextVer = (estVersionByMatter.get(est.matter_code) ?? 0) + 1;
           estVersionByMatter.set(est.matter_code, nextVer);
+          const estPence = resolvePenceField(
+            est.fees_estimate_pence,
+            est.fees_estimate,
+          );
           return [
             ctx.tenantId,
             est.estimate_id,
             est.matter_code,
             nextVer,
             est.date_given,
-            round2(est.fees_estimate),
+            minorUnitsToPounds(estPence),
+            minorUnitsToPgBigInt(estPence),
             JSON.stringify(est),
           ];
         },
-        { 6: '::jsonb' },
+        { 6: '::bigint', 7: '::jsonb' },
       );
 
       await this.batchInsertRowsInTx(
@@ -1677,21 +2019,26 @@ export class TenantPmsRepository extends TenantScopedRepository {
           'due_date',
           'status',
           'total_inc_vat',
+          'total_inc_vat_pence',
           'payload_json',
         ],
         dataset.invoices,
-        (inv) => [
-          ctx.tenantId,
-          inv.invoice_number,
-          inv.matter_code,
-          inv.client_code,
-          inv.invoice_date,
-          inv.due_date,
-          inv.status,
-          round2(inv.total),
-          JSON.stringify(inv),
-        ],
-        { 8: '::jsonb' },
+        (inv) => {
+          const totalPence = resolvePenceField(inv.total_pence, inv.total);
+          return [
+            ctx.tenantId,
+            inv.invoice_number,
+            inv.matter_code,
+            inv.client_code,
+            inv.invoice_date,
+            inv.due_date,
+            inv.status,
+            minorUnitsToPounds(totalPence),
+            minorUnitsToPgBigInt(totalPence),
+            JSON.stringify(inv),
+          ];
+        },
+        { 8: '::bigint', 9: '::jsonb' },
       );
 
       await this.batchInsertRowsInTx(
@@ -1705,20 +2052,25 @@ export class TenantPmsRepository extends TenantScopedRepository {
           'client_code',
           'payment_date',
           'amount',
+          'amount_pence',
           'payload_json',
         ],
         dataset.payments,
-        (pay) => [
-          ctx.tenantId,
-          pay.receipt_id,
-          pay.invoice_number,
-          pay.matter_code,
-          pay.client_code,
-          pay.receipt_date,
-          round2(pay.amount),
-          JSON.stringify(pay),
-        ],
-        { 7: '::jsonb' },
+        (pay) => {
+          const amtPence = resolvePenceField(pay.amount_pence, pay.amount);
+          return [
+            ctx.tenantId,
+            pay.receipt_id,
+            pay.invoice_number,
+            pay.matter_code,
+            pay.client_code,
+            pay.receipt_date,
+            minorUnitsToPounds(amtPence),
+            minorUnitsToPgBigInt(amtPence),
+            JSON.stringify(pay),
+          ];
+        },
+        { 7: '::bigint', 8: '::jsonb' },
       );
 
       await this.batchInsertRowsInTx(
@@ -1732,24 +2084,29 @@ export class TenantPmsRepository extends TenantScopedRepository {
           'entry_date',
           'hours',
           'value',
+          'value_pence',
           'billing_status',
           'invoice_number',
           'payload_json',
         ],
         dataset.timeEntries,
-        (te) => [
-          ctx.tenantId,
-          te.time_id,
-          te.matter_code,
-          te.fee_earner_id,
-          te.date,
-          Number(te.hours),
-          round2(te.value),
-          te.billed_status,
-          te.invoice_number ?? null,
-          JSON.stringify(te),
-        ],
-        { 9: '::jsonb' },
+        (te) => {
+          const valPence = resolvePenceField(te.value_pence, te.value);
+          return [
+            ctx.tenantId,
+            te.time_id,
+            te.matter_code,
+            te.fee_earner_id,
+            te.date,
+            Number(te.hours),
+            minorUnitsToPounds(valPence),
+            minorUnitsToPgBigInt(valPence),
+            te.billed_status,
+            te.invoice_number ?? null,
+            JSON.stringify(te),
+          ];
+        },
+        { 7: '::bigint', 10: '::jsonb' },
       );
 
       await this.batchInsertRowsInTx(
@@ -1761,25 +2118,30 @@ export class TenantPmsRepository extends TenantScopedRepository {
           'matter_code',
           'entry_date',
           'amount_ex_vat',
+          'amount_ex_vat_pence',
           'billing_status',
           'invoice_number',
           'payload_json',
         ],
         dataset.disbursements,
-        (d) => [
-          ctx.tenantId,
-          d.disbursement_id,
-          d.matter_code,
-          d.date,
-          round2(d.net_amount),
-          d.billed_status,
-          d.invoice_number ?? null,
-          JSON.stringify(d),
-        ],
-        { 7: '::jsonb' },
+        (d) => {
+          const netPence = resolvePenceField(d.net_amount_pence, d.net_amount);
+          return [
+            ctx.tenantId,
+            d.disbursement_id,
+            d.matter_code,
+            d.date,
+            minorUnitsToPounds(netPence),
+            minorUnitsToPgBigInt(netPence),
+            d.billed_status,
+            d.invoice_number ?? null,
+            JSON.stringify(d),
+          ];
+        },
+        { 5: '::bigint', 8: '::jsonb' },
       );
 
-      const runningPenceByMatter = new Map<string, number>();
+      const runningPenceByMatter = new Map<string, MinorUnits>();
       const sortedCa = [...dataset.clientAccount].sort((a, b) => {
         const cmpMatter = a.matter_code.localeCompare(b.matter_code);
         if (cmpMatter !== 0) return cmpMatter;
@@ -1798,21 +2160,27 @@ export class TenantPmsRepository extends TenantScopedRepository {
           'entry_date',
           'direction',
           'amount',
+          'amount_pence',
           'balance_after',
+          'balance_after_pence',
           'payload_json',
         ],
         sortedCa,
         (ca) => {
-          const amt = round2(ca.amount);
-          const nextPence =
-            (runningPenceByMatter.get(ca.matter_code) ?? 0) +
-            Math.round(amt * 100);
+          const amtPence = resolvePenceField(ca.amount_pence, ca.amount);
+          const amt = minorUnitsToPounds(amtPence);
+          const nextPence = sumMinorUnits([
+            runningPenceByMatter.get(ca.matter_code) ?? (0 as MinorUnits),
+            amtPence,
+          ]);
           runningPenceByMatter.set(ca.matter_code, nextPence);
-          const runningBalance = round2(nextPence / 100);
+          const runningBalance = minorUnitsToPounds(nextPence);
           const fullEntry: TenantPmsClientAccountEntry = {
             ...ca,
             amount: amt,
+            amount_pence: amtPence,
             running_balance: runningBalance,
+            running_balance_pence: nextPence,
           };
           return [
             ctx.tenantId,
@@ -1822,11 +2190,13 @@ export class TenantPmsRepository extends TenantScopedRepository {
             ca.date,
             ca.type,
             amt,
+            minorUnitsToPgBigInt(amtPence),
             runningBalance,
+            minorUnitsToPgBigInt(nextPence),
             JSON.stringify(fullEntry),
           ];
         },
-        { 8: '::jsonb' },
+        { 7: '::bigint', 9: '::bigint', 10: '::jsonb' },
       );
     });
 
@@ -1851,9 +2221,17 @@ export class TenantPmsRepository extends TenantScopedRepository {
     ctx: TenantContext,
     rows: readonly DbGenericPayloadRow[],
   ): TenantPmsFeeEarner[] {
-    return rows.map((row) => {
+    const corruptTracker = { count: 0 };
+    const mapped = rows.map((row) => {
       this.assertRowTenant(ctx, row.tenant_id, 'pms_fee_earners');
       const p = (row.payload_json ?? {}) as Partial<TenantPmsFeeEarner>;
+      const hourlyRatePence = pgBigIntToMinorUnits(
+        row.charge_out_rate_pence as string | number | bigint,
+      );
+      const annualTargetFeesPence = parsePayloadMoneyPence(
+        row.payload_annual_target_fees_text,
+        corruptTracker,
+      );
       return {
         fee_earner_id: String(row.fee_earner_id),
         initials: String(p.initials ?? ''),
@@ -1862,23 +2240,33 @@ export class TenantPmsRepository extends TenantScopedRepository {
         email: String(p.email ?? ''),
         grade: String(row.grade ?? p.grade ?? ''),
         department: String(row.department ?? p.department ?? ''),
-        standard_hourly_rate: round2(
-          Number(p.standard_hourly_rate ?? row.charge_out_rate ?? 0),
-        ),
+        standard_hourly_rate: minorUnitsToPounds(hourlyRatePence),
+        standard_hourly_rate_pence: hourlyRatePence,
         annual_target_hours: Number(p.annual_target_hours ?? 0),
-        annual_target_fees: round2(Number(p.annual_target_fees ?? 0)),
+        annual_target_fees:
+          annualTargetFeesPence !== null
+            ? minorUnitsToPounds(annualTargetFeesPence)
+            : null,
+        annual_target_fees_pence: annualTargetFeesPence,
         active: String(p.active ?? row.status ?? 'Yes'),
       };
     });
+    warnIfCorruptMoneyText(ctx, corruptTracker);
+    return mapped;
   }
 
   private mapClientRows(
     ctx: TenantContext,
     rows: readonly DbGenericPayloadRow[],
   ): TenantPmsClient[] {
-    return rows.map((row) => {
+    const corruptTracker = { count: 0 };
+    const mapped = rows.map((row) => {
       this.assertRowTenant(ctx, row.tenant_id, 'pms_clients');
       const p = (row.payload_json ?? {}) as Partial<TenantPmsClient>;
+      const creditLimitPence = parsePayloadMoneyPence(
+        row.payload_credit_limit_text,
+        corruptTracker,
+      );
       return {
         client_code: String(row.client_code),
         client_name: String(row.client_name ?? p.client_name ?? ''),
@@ -1892,7 +2280,9 @@ export class TenantPmsRepository extends TenantScopedRepository {
         postcode: String(p.postcode ?? ''),
         client_partner_id: String(p.client_partner_id ?? ''),
         credit_terms_days: Number(p.credit_terms_days ?? 0),
-        credit_limit: round2(Number(p.credit_limit ?? 0)),
+        credit_limit:
+          creditLimitPence !== null ? minorUnitsToPounds(creditLimitPence) : null,
+        credit_limit_pence: creditLimitPence,
         rate_discount_pct: Number(p.rate_discount_pct ?? 0),
         date_opened: String(p.date_opened ?? ''),
         sector: String(p.sector ?? ''),
@@ -1901,15 +2291,25 @@ export class TenantPmsRepository extends TenantScopedRepository {
         status: String(p.status ?? 'Active'),
       };
     });
+    warnIfCorruptMoneyText(ctx, corruptTracker);
+    return mapped;
   }
 
   private mapMatterRows(
     ctx: TenantContext,
     rows: readonly DbGenericPayloadRow[],
   ): TenantPmsMatter[] {
-    return rows.map((row) => {
+    const corruptTracker = { count: 0 };
+    const mapped = rows.map((row) => {
       this.assertRowTenant(ctx, row.tenant_id, 'pms_matters');
       const p = (row.payload_json ?? {}) as Partial<TenantPmsMatter>;
+      const fixedFeePence = parsePayloadMoneyPence(
+        row.payload_fixed_fee_amount_text,
+        corruptTracker,
+      );
+      const feeEstimatePence = pgBigIntToMinorUnits(
+        row.fee_estimate_pence as string | number | bigint,
+      );
       return {
         matter_code: String(row.matter_code),
         client_code: String(row.client_code),
@@ -1927,8 +2327,11 @@ export class TenantPmsRepository extends TenantScopedRepository {
         billing_basis: (row.billing_basis ??
           p.billing_basis ??
           'Hourly Rate') as TenantPmsMatter['billing_basis'],
-        fixed_fee_amount: round2(Number(p.fixed_fee_amount ?? 0)),
-        fee_estimate: round2(Number(row.fee_estimate ?? p.fee_estimate ?? 0)),
+        fixed_fee_amount:
+          fixedFeePence !== null ? minorUnitsToPounds(fixedFeePence) : null,
+        fixed_fee_amount_pence: fixedFeePence,
+        fee_estimate: minorUnitsToPounds(feeEstimatePence),
+        fee_estimate_pence: feeEstimatePence,
         estimate_alert_pct: Number(p.estimate_alert_pct ?? 0.75),
         date_opened: String(row.open_date ?? p.date_opened ?? ''),
         date_closed:
@@ -1943,6 +2346,8 @@ export class TenantPmsRepository extends TenantScopedRepository {
         third_party_payer: String(p.third_party_payer ?? ''),
       };
     });
+    warnIfCorruptMoneyText(ctx, corruptTracker);
+    return mapped;
   }
 
   private mapFeeEstimateRows(
@@ -1950,21 +2355,32 @@ export class TenantPmsRepository extends TenantScopedRepository {
     rows: readonly DbGenericPayloadRow[],
     feById: ReadonlyMap<string, TenantPmsFeeEarner>,
   ): TenantPmsFeeEstimate[] {
-    return rows.map((row) => {
+    const corruptTracker = { count: 0 };
+    const mapped = rows.map((row) => {
       this.assertRowTenant(ctx, row.tenant_id, 'pms_fee_estimates');
       const p = (row.payload_json ?? {}) as Partial<TenantPmsFeeEstimate>;
       const givenBy = String(p.given_by ?? '');
       const fe = feById.get(givenBy);
+      const feesEstimatePence = pgBigIntToMinorUnits(
+        row.estimated_fees_ex_vat_pence as string | number | bigint,
+      );
+      const disbEstimatePence = parsePayloadMoneyPence(
+        row.payload_disbursements_estimate_text,
+        corruptTracker,
+      );
       return {
         estimate_id: String(row.estimate_id),
         matter_code: String(row.matter_code),
         date_given: String(row.estimate_date ?? p.date_given ?? ''),
         estimate_type: (p.estimate_type ??
           'Initial') as TenantPmsFeeEstimate['estimate_type'],
-        fees_estimate: round2(
-          Number(row.estimated_fees_ex_vat ?? p.fees_estimate ?? 0),
-        ),
-        disbursements_estimate: round2(Number(p.disbursements_estimate ?? 0)),
+        fees_estimate: minorUnitsToPounds(feesEstimatePence),
+        fees_estimate_pence: feesEstimatePence,
+        disbursements_estimate:
+          disbEstimatePence !== null
+            ? minorUnitsToPounds(disbEstimatePence)
+            : null,
+        disbursements_estimate_pence: disbEstimatePence,
         given_by: givenBy,
         given_by_name: fe
           ? `${fe.first_name} ${fe.last_name}`
@@ -1974,15 +2390,33 @@ export class TenantPmsRepository extends TenantScopedRepository {
         notes: String(p.notes ?? ''),
       };
     });
+    warnIfCorruptMoneyText(ctx, corruptTracker);
+    return mapped;
   }
 
   private mapInvoiceRows(
     ctx: TenantContext,
     rows: readonly DbGenericPayloadRow[],
   ): TenantPmsInvoiceRow[] {
-    return rows.map((row) => {
+    const corruptTracker = { count: 0 };
+    const mapped = rows.map((row) => {
       this.assertRowTenant(ctx, row.tenant_id, 'pms_invoices');
       const p = (row.payload_json ?? {}) as Partial<TenantPmsInvoiceRow>;
+      const feesNetPence = parsePayloadMoneyPence(
+        row.payload_fees_net_text,
+        corruptTracker,
+      );
+      const disbNetPence = parsePayloadMoneyPence(
+        row.payload_disbursements_net_text,
+        corruptTracker,
+      );
+      const vatPence = parsePayloadMoneyPence(
+        row.payload_vat_text,
+        corruptTracker,
+      );
+      const totalPence = pgBigIntToMinorUnits(
+        row.total_inc_vat_pence as string | number | bigint,
+      );
       return {
         invoice_number: String(row.invoice_number),
         matter_code: String(row.matter_code),
@@ -1992,14 +2426,21 @@ export class TenantPmsRepository extends TenantScopedRepository {
         invoice_type: String(p.invoice_type ?? 'Interim'),
         period_from: p.period_from ? String(p.period_from) : null,
         period_to: p.period_to ? String(p.period_to) : null,
-        fees_net: round2(Number(p.fees_net ?? 0)),
-        disbursements_net: round2(Number(p.disbursements_net ?? 0)),
-        vat: round2(Number(p.vat ?? 0)),
-        total: round2(Number(row.total_inc_vat ?? p.total ?? 0)),
+        fees_net: feesNetPence !== null ? minorUnitsToPounds(feesNetPence) : null,
+        fees_net_pence: feesNetPence,
+        disbursements_net:
+          disbNetPence !== null ? minorUnitsToPounds(disbNetPence) : null,
+        disbursements_net_pence: disbNetPence,
+        vat: vatPence !== null ? minorUnitsToPounds(vatPence) : null,
+        vat_pence: vatPence,
+        total: minorUnitsToPounds(totalPence),
+        total_pence: totalPence,
         status: String(row.status ?? p.status ?? ''),
         credit_note_for: p.credit_note_for ? String(p.credit_note_for) : null,
       };
     });
+    warnIfCorruptMoneyText(ctx, corruptTracker);
+    return mapped;
   }
 
   private mapPaymentRows(
@@ -2009,13 +2450,17 @@ export class TenantPmsRepository extends TenantScopedRepository {
     return rows.map((row) => {
       this.assertRowTenant(ctx, row.tenant_id, 'pms_payments');
       const p = (row.payload_json ?? {}) as Partial<TenantPmsPayment>;
+      const amountPence = pgBigIntToMinorUnits(
+        row.amount_pence as string | number | bigint,
+      );
       return {
         receipt_id: String(row.receipt_id),
         invoice_number: String(row.invoice_number),
         matter_code: String(row.matter_code),
         client_code: String(row.client_code),
         receipt_date: String(row.payment_date ?? p.receipt_date ?? ''),
-        amount: round2(Number(row.amount ?? p.amount ?? 0)),
+        amount: minorUnitsToPounds(amountPence),
+        amount_pence: amountPence,
         method: String(p.method ?? ''),
         reference: String(p.reference ?? ''),
       };
@@ -2027,11 +2472,27 @@ export class TenantPmsRepository extends TenantScopedRepository {
     rows: readonly DbGenericPayloadRow[],
     feById: ReadonlyMap<string, TenantPmsFeeEarner>,
   ): TenantPmsTimeEntry[] {
-    return rows.map((row) => {
+    const corruptTracker = { count: 0 };
+    const mapped = rows.map((row) => {
       this.assertRowTenant(ctx, row.tenant_id, 'pms_time_entries');
       const p = (row.payload_json ?? {}) as Partial<TenantPmsTimeEntry>;
       const feId = String(row.fee_earner_id);
       const fe = feById.get(feId);
+      const ratePence = parsePayloadMoneyPence(
+        row.payload_rate_text,
+        corruptTracker,
+      );
+      const valuePence = pgBigIntToMinorUnits(
+        row.value_pence as string | number | bigint,
+      );
+      const billedValuePence = parsePayloadMoneyPence(
+        row.payload_billed_value_text,
+        corruptTracker,
+      );
+      const writeOffValuePence = parsePayloadMoneyPence(
+        row.payload_write_off_value_text,
+        corruptTracker,
+      );
       return {
         time_id: String(row.time_id),
         matter_code: String(row.matter_code),
@@ -2046,8 +2507,10 @@ export class TenantPmsRepository extends TenantScopedRepository {
         minutes: Number(p.minutes ?? 0),
         units: Number(p.units ?? 0),
         hours: Number(row.hours ?? p.hours ?? 0),
-        rate: round2(Number(p.rate ?? 0)),
-        value: round2(Number(row.value ?? p.value ?? 0)),
+        rate: ratePence !== null ? minorUnitsToPounds(ratePence) : null,
+        rate_pence: ratePence,
+        value: minorUnitsToPounds(valuePence),
+        value_pence: valuePence,
         chargeable: (p.chargeable ?? 'Y') as 'Y' | 'N',
         billed_status: (row.billing_status ??
           p.billed_status ??
@@ -2056,19 +2519,41 @@ export class TenantPmsRepository extends TenantScopedRepository {
           row.invoice_number || p.invoice_number
             ? String(row.invoice_number ?? p.invoice_number)
             : null,
-        billed_value: round2(Number(p.billed_value ?? 0)),
-        write_off_value: round2(Number(p.write_off_value ?? 0)),
+        billed_value:
+          billedValuePence !== null
+            ? minorUnitsToPounds(billedValuePence)
+            : null,
+        billed_value_pence: billedValuePence,
+        write_off_value:
+          writeOffValuePence !== null
+            ? minorUnitsToPounds(writeOffValuePence)
+            : null,
+        write_off_value_pence: writeOffValuePence,
       };
     });
+    warnIfCorruptMoneyText(ctx, corruptTracker);
+    return mapped;
   }
 
   private mapDisbursementRows(
     ctx: TenantContext,
     rows: readonly DbGenericPayloadRow[],
   ): TenantPmsDisbursement[] {
-    return rows.map((row) => {
+    const corruptTracker = { count: 0 };
+    const mapped = rows.map((row) => {
       this.assertRowTenant(ctx, row.tenant_id, 'pms_disbursements');
       const p = (row.payload_json ?? {}) as Partial<TenantPmsDisbursement>;
+      const netAmountPence = pgBigIntToMinorUnits(
+        row.amount_ex_vat_pence as string | number | bigint,
+      );
+      const vatAmountPence = parsePayloadMoneyPence(
+        row.payload_vat_amount_text,
+        corruptTracker,
+      );
+      const grossAmountPence = parsePayloadMoneyPence(
+        row.payload_gross_amount_text,
+        corruptTracker,
+      );
       return {
         disbursement_id: String(row.disbursement_id),
         matter_code: String(row.matter_code),
@@ -2076,9 +2561,16 @@ export class TenantPmsRepository extends TenantScopedRepository {
         type: String(p.type ?? ''),
         supplier: String(p.supplier ?? ''),
         description: String(p.description ?? ''),
-        net_amount: round2(Number(row.amount_ex_vat ?? p.net_amount ?? 0)),
-        vat_amount: round2(Number(p.vat_amount ?? 0)),
-        gross_amount: round2(Number(p.gross_amount ?? 0)),
+        net_amount: minorUnitsToPounds(netAmountPence),
+        net_amount_pence: netAmountPence,
+        vat_amount:
+          vatAmountPence !== null ? minorUnitsToPounds(vatAmountPence) : null,
+        vat_amount_pence: vatAmountPence,
+        gross_amount:
+          grossAmountPence !== null
+            ? minorUnitsToPounds(grossAmountPence)
+            : null,
+        gross_amount_pence: grossAmountPence,
         paid_from: (p.paid_from ??
           'Office') as TenantPmsDisbursement['paid_from'],
         billed_status: (row.billing_status ??
@@ -2090,33 +2582,37 @@ export class TenantPmsRepository extends TenantScopedRepository {
             : null,
       };
     });
+    warnIfCorruptMoneyText(ctx, corruptTracker);
+    return mapped;
   }
 
   private mapClientAccountRows(
     ctx: TenantContext,
     rows: readonly DbGenericPayloadRow[],
   ): TenantPmsClientAccountEntry[] {
-    const runningByMatter = new Map<string, number>();
     return rows.map((row) => {
       this.assertRowTenant(ctx, row.tenant_id, 'pms_client_account_entries');
       const p = (row.payload_json ??
         {}) as Partial<TenantPmsClientAccountEntry>;
-      const mCode = String(row.matter_code);
-      const amt = round2(Number(row.amount ?? p.amount ?? 0));
-      const nextPence =
-        (runningByMatter.get(mCode) ?? 0) + Math.round(amt * 100);
-      runningByMatter.set(mCode, nextPence);
+      const amtPence = pgBigIntToMinorUnits(
+        row.amount_pence as string | number | bigint,
+      );
+      const balanceAfterPence = pgBigIntToMinorUnits(
+        row.balance_after_pence as string | number | bigint,
+      );
       return {
         transaction_id: String(row.transaction_id),
-        matter_code: mCode,
+        matter_code: String(row.matter_code),
         client_code: String(row.client_code),
         date: String(row.entry_date ?? p.date ?? ''),
         type: (row.direction ??
           p.type ??
           'Receipt') as TenantPmsClientAccountEntry['type'],
         description: String(p.description ?? ''),
-        amount: amt,
-        running_balance: round2(nextPence / 100),
+        amount: minorUnitsToPounds(amtPence),
+        amount_pence: amtPence,
+        running_balance: minorUnitsToPounds(balanceAfterPence),
+        running_balance_pence: balanceAfterPence,
       };
     });
   }
@@ -2129,7 +2625,7 @@ export class TenantPmsRepository extends TenantScopedRepository {
     const pmsLinks = await this.listPmsLinksInTx(tx, ctx);
 
     const feRes = await tx.query<DbGenericPayloadRow>(
-      'SELECT * FROM public.pms_fee_earners WHERE tenant_id = $1 ORDER BY fee_earner_id ASC',
+      `SELECT ${PMS_FEE_EARNERS_SELECT} FROM public.pms_fee_earners WHERE tenant_id = $1 ORDER BY fee_earner_id ASC`,
       [ctx.tenantId],
     );
     const feeEarners = this.mapFeeEarnerRows(ctx, feRes.rows);
@@ -2147,19 +2643,19 @@ export class TenantPmsRepository extends TenantScopedRepository {
       ccRes,
     ] = await Promise.all([
       tx.query<DbGenericPayloadRow>(
-        'SELECT * FROM public.pms_clients WHERE tenant_id = $1 ORDER BY client_code ASC',
+        `SELECT ${PMS_CLIENTS_SELECT} FROM public.pms_clients WHERE tenant_id = $1 ORDER BY client_code ASC`,
         [ctx.tenantId],
       ),
       tx.query<DbGenericPayloadRow>(
-        'SELECT * FROM public.pms_matters WHERE tenant_id = $1 ORDER BY matter_code ASC',
+        `SELECT ${PMS_MATTERS_SELECT} FROM public.pms_matters WHERE tenant_id = $1 ORDER BY matter_code ASC`,
         [ctx.tenantId],
       ),
       tx.query<DbGenericPayloadRow>(
-        'SELECT * FROM public.pms_fee_estimates WHERE tenant_id = $1 ORDER BY estimate_date ASC, estimate_id ASC',
+        `SELECT ${PMS_FEE_ESTIMATES_SELECT} FROM public.pms_fee_estimates WHERE tenant_id = $1 ORDER BY estimate_date ASC, estimate_id ASC`,
         [ctx.tenantId],
       ),
       tx.query<DbGenericPayloadRow>(
-        'SELECT * FROM public.pms_invoices WHERE tenant_id = $1 ORDER BY invoice_date DESC, invoice_number DESC',
+        `SELECT ${PMS_INVOICES_SELECT} FROM public.pms_invoices WHERE tenant_id = $1 ORDER BY invoice_date DESC, invoice_number DESC`,
         [ctx.tenantId],
       ),
       tx.query<DbGenericPayloadRow>(
@@ -2167,11 +2663,11 @@ export class TenantPmsRepository extends TenantScopedRepository {
         [ctx.tenantId],
       ),
       tx.query<DbGenericPayloadRow>(
-        'SELECT * FROM public.pms_time_entries WHERE tenant_id = $1 ORDER BY entry_date DESC, time_id DESC',
+        `SELECT ${PMS_TIME_ENTRIES_SELECT} FROM public.pms_time_entries WHERE tenant_id = $1 ORDER BY entry_date DESC, time_id DESC`,
         [ctx.tenantId],
       ),
       tx.query<DbGenericPayloadRow>(
-        'SELECT * FROM public.pms_disbursements WHERE tenant_id = $1 ORDER BY entry_date DESC, disbursement_id DESC',
+        `SELECT ${PMS_DISBURSEMENTS_SELECT} FROM public.pms_disbursements WHERE tenant_id = $1 ORDER BY entry_date DESC, disbursement_id DESC`,
         [ctx.tenantId],
       ),
       tx.query<DbGenericPayloadRow>(
@@ -2267,7 +2763,7 @@ export class TenantPmsRepository extends TenantScopedRepository {
   ): Promise<TenantPmsFeeEarner[]> {
     return this.withTenantReadTransaction(ctx, async (tx) => {
       const feRes = await tx.query<DbGenericPayloadRow>(
-        'SELECT * FROM public.pms_fee_earners WHERE tenant_id = $1 ORDER BY fee_earner_id ASC',
+        `SELECT ${PMS_FEE_EARNERS_SELECT} FROM public.pms_fee_earners WHERE tenant_id = $1 ORDER BY fee_earner_id ASC`,
         [ctx.tenantId],
       );
       return this.mapFeeEarnerRows(ctx, feRes.rows);
@@ -2277,7 +2773,7 @@ export class TenantPmsRepository extends TenantScopedRepository {
   public async listClients(ctx: TenantContext): Promise<TenantPmsClient[]> {
     return this.withTenantReadTransaction(ctx, async (tx) => {
       const res = await tx.query<DbGenericPayloadRow>(
-        'SELECT * FROM public.pms_clients WHERE tenant_id = $1 ORDER BY client_code ASC',
+        `SELECT ${PMS_CLIENTS_SELECT} FROM public.pms_clients WHERE tenant_id = $1 ORDER BY client_code ASC`,
         [ctx.tenantId],
       );
       return this.mapClientRows(ctx, res.rows);
@@ -2287,7 +2783,7 @@ export class TenantPmsRepository extends TenantScopedRepository {
   public async listMatters(ctx: TenantContext): Promise<TenantPmsMatter[]> {
     return this.withTenantReadTransaction(ctx, async (tx) => {
       const res = await tx.query<DbGenericPayloadRow>(
-        'SELECT * FROM public.pms_matters WHERE tenant_id = $1 ORDER BY matter_code ASC',
+        `SELECT ${PMS_MATTERS_SELECT} FROM public.pms_matters WHERE tenant_id = $1 ORDER BY matter_code ASC`,
         [ctx.tenantId],
       );
       return this.mapMatterRows(ctx, res.rows);
@@ -2302,7 +2798,7 @@ export class TenantPmsRepository extends TenantScopedRepository {
     if (!cleanCode) return null;
     return this.withTenantReadTransaction(ctx, async (tx) => {
       const res = await tx.query<DbGenericPayloadRow>(
-        'SELECT * FROM public.pms_clients WHERE tenant_id = $1 AND client_code = $2 LIMIT 1',
+        `SELECT ${PMS_CLIENTS_SELECT} FROM public.pms_clients WHERE tenant_id = $1 AND client_code = $2 LIMIT 1`,
         [ctx.tenantId, cleanCode],
       );
       return this.mapClientRows(ctx, res.rows)[0] ?? null;
@@ -2317,7 +2813,7 @@ export class TenantPmsRepository extends TenantScopedRepository {
     if (!cleanCode) return null;
     return this.withTenantReadTransaction(ctx, async (tx) => {
       const res = await tx.query<DbGenericPayloadRow>(
-        'SELECT * FROM public.pms_matters WHERE tenant_id = $1 AND matter_code = $2 LIMIT 1',
+        `SELECT ${PMS_MATTERS_SELECT} FROM public.pms_matters WHERE tenant_id = $1 AND matter_code = $2 LIMIT 1`,
         [ctx.tenantId, cleanCode],
       );
       return this.mapMatterRows(ctx, res.rows)[0] ?? null;
@@ -2329,7 +2825,7 @@ export class TenantPmsRepository extends TenantScopedRepository {
   ): Promise<TenantPmsMatter[]> {
     return this.withTenantReadTransaction(ctx, async (tx) => {
       const res = await tx.query<DbGenericPayloadRow>(
-        `SELECT m.*
+        `SELECT m.*, m.payload_json->>'fixed_fee_amount' AS payload_fixed_fee_amount_text
          FROM public.pms_matters m
          WHERE m.tenant_id = $1
            AND NOT EXISTS (
@@ -2359,19 +2855,19 @@ export class TenantPmsRepository extends TenantScopedRepository {
         await Promise.all([
           this.getExtractInfoInTx(tx, ctx),
           tx.query<DbGenericPayloadRow>(
-            'SELECT * FROM public.pms_fee_earners WHERE tenant_id = $1 ORDER BY fee_earner_id ASC',
+            `SELECT ${PMS_FEE_EARNERS_SELECT} FROM public.pms_fee_earners WHERE tenant_id = $1 ORDER BY fee_earner_id ASC`,
             [ctx.tenantId],
           ),
           tx.query<DbGenericPayloadRow>(
-            'SELECT * FROM public.pms_matters WHERE tenant_id = $1 AND matter_code = ANY($2::text[]) ORDER BY matter_code ASC',
+            `SELECT ${PMS_MATTERS_SELECT} FROM public.pms_matters WHERE tenant_id = $1 AND matter_code = ANY($2::text[]) ORDER BY matter_code ASC`,
             [ctx.tenantId, cleanCodes],
           ),
           tx.query<DbGenericPayloadRow>(
-            'SELECT * FROM public.pms_fee_estimates WHERE tenant_id = $1 AND matter_code = ANY($2::text[]) ORDER BY estimate_date ASC, estimate_id ASC',
+            `SELECT ${PMS_FEE_ESTIMATES_SELECT} FROM public.pms_fee_estimates WHERE tenant_id = $1 AND matter_code = ANY($2::text[]) ORDER BY estimate_date ASC, estimate_id ASC`,
             [ctx.tenantId, cleanCodes],
           ),
           tx.query<DbGenericPayloadRow>(
-            'SELECT * FROM public.pms_invoices WHERE tenant_id = $1 AND matter_code = ANY($2::text[]) ORDER BY invoice_date DESC, invoice_number DESC',
+            `SELECT ${PMS_INVOICES_SELECT} FROM public.pms_invoices WHERE tenant_id = $1 AND matter_code = ANY($2::text[]) ORDER BY invoice_date DESC, invoice_number DESC`,
             [ctx.tenantId, cleanCodes],
           ),
           tx.query<DbGenericPayloadRow>(
@@ -2379,11 +2875,11 @@ export class TenantPmsRepository extends TenantScopedRepository {
             [ctx.tenantId, cleanCodes],
           ),
           tx.query<DbGenericPayloadRow>(
-            'SELECT * FROM public.pms_time_entries WHERE tenant_id = $1 AND matter_code = ANY($2::text[]) ORDER BY entry_date DESC, time_id DESC',
+            `SELECT ${PMS_TIME_ENTRIES_SELECT} FROM public.pms_time_entries WHERE tenant_id = $1 AND matter_code = ANY($2::text[]) ORDER BY entry_date DESC, time_id DESC`,
             [ctx.tenantId, cleanCodes],
           ),
           tx.query<DbGenericPayloadRow>(
-            'SELECT * FROM public.pms_disbursements WHERE tenant_id = $1 AND matter_code = ANY($2::text[]) ORDER BY entry_date DESC, disbursement_id DESC',
+            `SELECT ${PMS_DISBURSEMENTS_SELECT} FROM public.pms_disbursements WHERE tenant_id = $1 AND matter_code = ANY($2::text[]) ORDER BY entry_date DESC, disbursement_id DESC`,
             [ctx.tenantId, cleanCodes],
           ),
           tx.query<DbGenericPayloadRow>(
@@ -2400,7 +2896,7 @@ export class TenantPmsRepository extends TenantScopedRepository {
       const clientRes =
         clientCodes.length > 0
           ? await tx.query<DbGenericPayloadRow>(
-              'SELECT * FROM public.pms_clients WHERE tenant_id = $1 AND client_code = ANY($2::text[]) ORDER BY client_code ASC',
+              `SELECT ${PMS_CLIENTS_SELECT} FROM public.pms_clients WHERE tenant_id = $1 AND client_code = ANY($2::text[]) ORDER BY client_code ASC`,
               [ctx.tenantId, clientCodes],
             )
           : { rows: [] as DbGenericPayloadRow[] };
@@ -2456,11 +2952,11 @@ export class TenantPmsRepository extends TenantScopedRepository {
     return this.withTenantReadTransaction(ctx, async (tx) => {
       const [feRes, estRes] = await Promise.all([
         tx.query<DbGenericPayloadRow>(
-          'SELECT * FROM public.pms_fee_earners WHERE tenant_id = $1 ORDER BY fee_earner_id ASC',
+          `SELECT ${PMS_FEE_EARNERS_SELECT} FROM public.pms_fee_earners WHERE tenant_id = $1 ORDER BY fee_earner_id ASC`,
           [ctx.tenantId],
         ),
         tx.query<DbGenericPayloadRow>(
-          'SELECT * FROM public.pms_fee_estimates WHERE tenant_id = $1 AND matter_code = $2 ORDER BY estimate_date ASC, estimate_id ASC',
+          `SELECT ${PMS_FEE_ESTIMATES_SELECT} FROM public.pms_fee_estimates WHERE tenant_id = $1 AND matter_code = $2 ORDER BY estimate_date ASC, estimate_id ASC`,
           [ctx.tenantId, matterCode],
         ),
       ]);
@@ -2496,11 +2992,11 @@ export class TenantPmsRepository extends TenantScopedRepository {
       }
       const [feRes, teRes] = await Promise.all([
         tx.query<DbGenericPayloadRow>(
-          'SELECT * FROM public.pms_fee_earners WHERE tenant_id = $1 ORDER BY fee_earner_id ASC',
+          `SELECT ${PMS_FEE_EARNERS_SELECT} FROM public.pms_fee_earners WHERE tenant_id = $1 ORDER BY fee_earner_id ASC`,
           [ctx.tenantId],
         ),
         tx.query<DbGenericPayloadRow>(
-          `SELECT * FROM public.pms_time_entries WHERE ${clauses.join(' AND ')} ORDER BY entry_date DESC, time_id DESC`,
+          `SELECT ${PMS_TIME_ENTRIES_SELECT} FROM public.pms_time_entries WHERE ${clauses.join(' AND ')} ORDER BY entry_date DESC, time_id DESC`,
           params,
         ),
       ]);
@@ -2522,7 +3018,7 @@ export class TenantPmsRepository extends TenantScopedRepository {
     return this.withTenantReadTransaction(ctx, async (tx) => {
       const extractInfo = await this.getExtractInfoInTx(tx, ctx);
       const feRes = await tx.query<DbGenericPayloadRow>(
-        'SELECT * FROM public.pms_fee_earners WHERE tenant_id = $1 AND fee_earner_id = $2',
+        `SELECT ${PMS_FEE_EARNERS_SELECT} FROM public.pms_fee_earners WHERE tenant_id = $1 AND fee_earner_id = $2`,
         [ctx.tenantId, feeEarnerId],
       );
       const feeEarners = this.mapFeeEarnerRows(ctx, feRes.rows);
@@ -2543,7 +3039,7 @@ export class TenantPmsRepository extends TenantScopedRepository {
         clauses.push(`matter_code = ANY($${params.length}::text[])`);
       }
       const teRes = await tx.query<DbGenericPayloadRow>(
-        `SELECT * FROM public.pms_time_entries WHERE ${clauses.join(' AND ')} ORDER BY entry_date DESC, time_id DESC`,
+        `SELECT ${PMS_TIME_ENTRIES_SELECT} FROM public.pms_time_entries WHERE ${clauses.join(' AND ')} ORDER BY entry_date DESC, time_id DESC`,
         params,
       );
       const feById = new Map([[feeEarner.fee_earner_id, feeEarner]]);
@@ -2561,11 +3057,11 @@ export class TenantPmsRepository extends TenantScopedRepository {
     return this.withTenantReadTransaction(ctx, async (tx) => {
       const [feRes, teRes] = await Promise.all([
         tx.query<DbGenericPayloadRow>(
-          'SELECT * FROM public.pms_fee_earners WHERE tenant_id = $1 ORDER BY fee_earner_id ASC',
+          `SELECT ${PMS_FEE_EARNERS_SELECT} FROM public.pms_fee_earners WHERE tenant_id = $1 ORDER BY fee_earner_id ASC`,
           [ctx.tenantId],
         ),
         tx.query<DbGenericPayloadRow>(
-          'SELECT * FROM public.pms_time_entries WHERE tenant_id = $1 ORDER BY entry_date DESC, time_id DESC',
+          `SELECT ${PMS_TIME_ENTRIES_SELECT} FROM public.pms_time_entries WHERE tenant_id = $1 ORDER BY entry_date DESC, time_id DESC`,
           [ctx.tenantId],
         ),
       ]);
@@ -2583,11 +3079,11 @@ export class TenantPmsRepository extends TenantScopedRepository {
       const [extractInfo, feRes, teRes] = await Promise.all([
         this.getExtractInfoInTx(tx, ctx),
         tx.query<DbGenericPayloadRow>(
-          'SELECT * FROM public.pms_fee_earners WHERE tenant_id = $1 ORDER BY fee_earner_id ASC',
+          `SELECT ${PMS_FEE_EARNERS_SELECT} FROM public.pms_fee_earners WHERE tenant_id = $1 ORDER BY fee_earner_id ASC`,
           [ctx.tenantId],
         ),
         tx.query<DbGenericPayloadRow>(
-          'SELECT * FROM public.pms_time_entries WHERE tenant_id = $1 AND matter_code = $2 ORDER BY entry_date DESC, time_id DESC',
+          `SELECT ${PMS_TIME_ENTRIES_SELECT} FROM public.pms_time_entries WHERE tenant_id = $1 AND matter_code = $2 ORDER BY entry_date DESC, time_id DESC`,
           [ctx.tenantId, matterCode],
         ),
       ]);
@@ -2610,7 +3106,7 @@ export class TenantPmsRepository extends TenantScopedRepository {
       const [extractInfo, invRes, payRes] = await Promise.all([
         this.getExtractInfoInTx(tx, ctx),
         tx.query<DbGenericPayloadRow>(
-          'SELECT * FROM public.pms_invoices WHERE tenant_id = $1 ORDER BY invoice_date DESC, invoice_number DESC',
+          `SELECT ${PMS_INVOICES_SELECT} FROM public.pms_invoices WHERE tenant_id = $1 ORDER BY invoice_date DESC, invoice_number DESC`,
           [ctx.tenantId],
         ),
         tx.query<DbGenericPayloadRow>(
@@ -2634,7 +3130,7 @@ export class TenantPmsRepository extends TenantScopedRepository {
       const [extractInfo, invRes, payRes] = await Promise.all([
         this.getExtractInfoInTx(tx, ctx),
         tx.query<DbGenericPayloadRow>(
-          `SELECT * FROM public.pms_invoices
+          `SELECT ${PMS_INVOICES_SELECT} FROM public.pms_invoices
            WHERE tenant_id = $1
              AND (invoice_number = $2 OR payload_json->>'credit_note_for' = $2)`,
           [ctx.tenantId, invoiceNumber],
@@ -2662,7 +3158,7 @@ export class TenantPmsRepository extends TenantScopedRepository {
       const [extractInfo, invRes, payRes] = await Promise.all([
         this.getExtractInfoInTx(tx, ctx),
         tx.query<DbGenericPayloadRow>(
-          `SELECT * FROM public.pms_invoices WHERE ${whereClauseSql}`,
+          `SELECT ${PMS_INVOICES_SELECT} FROM public.pms_invoices WHERE ${whereClauseSql}`,
           params,
         ),
         tx.query<DbGenericPayloadRow>(
@@ -2755,11 +3251,11 @@ export class TenantPmsRepository extends TenantScopedRepository {
       const [extractInfo, invRes, feRes] = await Promise.all([
         this.getExtractInfoInTx(tx, ctx),
         tx.query<DbGenericPayloadRow>(
-          `SELECT * FROM public.pms_invoices WHERE ${invClauses.join(' AND ')} ORDER BY invoice_date DESC, invoice_number DESC`,
+          `SELECT ${PMS_INVOICES_SELECT} FROM public.pms_invoices WHERE ${invClauses.join(' AND ')} ORDER BY invoice_date DESC, invoice_number DESC`,
           invParams,
         ),
         tx.query<DbGenericPayloadRow>(
-          'SELECT * FROM public.pms_fee_earners WHERE tenant_id = $1 ORDER BY fee_earner_id ASC',
+          `SELECT ${PMS_FEE_EARNERS_SELECT} FROM public.pms_fee_earners WHERE tenant_id = $1 ORDER BY fee_earner_id ASC`,
           [ctx.tenantId],
         ),
       ]);
@@ -2774,11 +3270,11 @@ export class TenantPmsRepository extends TenantScopedRepository {
           [ctx.tenantId, invNumbers],
         ),
         tx.query<DbGenericPayloadRow>(
-          'SELECT * FROM public.pms_time_entries WHERE tenant_id = $1 AND matter_code = ANY($2::text[]) AND invoice_number = ANY($3::text[])',
+          `SELECT ${PMS_TIME_ENTRIES_SELECT} FROM public.pms_time_entries WHERE tenant_id = $1 AND matter_code = ANY($2::text[]) AND invoice_number = ANY($3::text[])`,
           [ctx.tenantId, matterCodes, invNumbers],
         ),
         tx.query<DbGenericPayloadRow>(
-          'SELECT * FROM public.pms_disbursements WHERE tenant_id = $1 AND matter_code = ANY($2::text[]) AND invoice_number = ANY($3::text[])',
+          `SELECT ${PMS_DISBURSEMENTS_SELECT} FROM public.pms_disbursements WHERE tenant_id = $1 AND matter_code = ANY($2::text[]) AND invoice_number = ANY($3::text[])`,
           [ctx.tenantId, matterCodes, invNumbers],
         ),
       ]);
@@ -2830,7 +3326,7 @@ export class TenantPmsRepository extends TenantScopedRepository {
   ): Promise<TenantPmsDisbursement[]> {
     return this.withTenantReadTransaction(ctx, async (tx) => {
       const res = await tx.query<DbGenericPayloadRow>(
-        'SELECT * FROM public.pms_disbursements WHERE tenant_id = $1 AND matter_code = $2 ORDER BY entry_date DESC, disbursement_id DESC',
+        `SELECT ${PMS_DISBURSEMENTS_SELECT} FROM public.pms_disbursements WHERE tenant_id = $1 AND matter_code = $2 ORDER BY entry_date DESC, disbursement_id DESC`,
         [ctx.tenantId, matterCode],
       );
       return this.mapDisbursementRows(ctx, res.rows);
@@ -2847,7 +3343,7 @@ export class TenantPmsRepository extends TenantScopedRepository {
     if (cleanCodes.length === 0) return [];
     return this.withTenantReadTransaction(ctx, async (tx) => {
       const res = await tx.query<DbGenericPayloadRow>(
-        'SELECT * FROM public.pms_disbursements WHERE tenant_id = $1 AND matter_code = ANY($2::text[]) ORDER BY entry_date DESC, disbursement_id DESC',
+        `SELECT ${PMS_DISBURSEMENTS_SELECT} FROM public.pms_disbursements WHERE tenant_id = $1 AND matter_code = ANY($2::text[]) ORDER BY entry_date DESC, disbursement_id DESC`,
         [ctx.tenantId, cleanCodes],
       );
       return this.mapDisbursementRows(ctx, res.rows);
@@ -2921,19 +3417,19 @@ export class TenantPmsRepository extends TenantScopedRepository {
       ] = await Promise.all([
         this.getExtractInfoInTx(tx, ctx),
         tx.query<DbGenericPayloadRow>(
-          'SELECT * FROM public.pms_fee_earners WHERE tenant_id = $1 ORDER BY fee_earner_id ASC',
+          `SELECT ${PMS_FEE_EARNERS_SELECT} FROM public.pms_fee_earners WHERE tenant_id = $1 ORDER BY fee_earner_id ASC`,
           [ctx.tenantId],
         ),
         tx.query<DbGenericPayloadRow>(
-          'SELECT * FROM public.pms_matters WHERE tenant_id = $1 AND matter_code = $2',
+          `SELECT ${PMS_MATTERS_SELECT} FROM public.pms_matters WHERE tenant_id = $1 AND matter_code = $2`,
           [ctx.tenantId, matterCode],
         ),
         tx.query<DbGenericPayloadRow>(
-          'SELECT * FROM public.pms_fee_estimates WHERE tenant_id = $1 AND matter_code = $2 ORDER BY estimate_date ASC, estimate_id ASC',
+          `SELECT ${PMS_FEE_ESTIMATES_SELECT} FROM public.pms_fee_estimates WHERE tenant_id = $1 AND matter_code = $2 ORDER BY estimate_date ASC, estimate_id ASC`,
           [ctx.tenantId, matterCode],
         ),
         tx.query<DbGenericPayloadRow>(
-          'SELECT * FROM public.pms_invoices WHERE tenant_id = $1 AND matter_code = $2 ORDER BY invoice_date DESC, invoice_number DESC',
+          `SELECT ${PMS_INVOICES_SELECT} FROM public.pms_invoices WHERE tenant_id = $1 AND matter_code = $2 ORDER BY invoice_date DESC, invoice_number DESC`,
           [ctx.tenantId, matterCode],
         ),
         tx.query<DbGenericPayloadRow>(
@@ -2941,11 +3437,11 @@ export class TenantPmsRepository extends TenantScopedRepository {
           [ctx.tenantId, matterCode],
         ),
         tx.query<DbGenericPayloadRow>(
-          'SELECT * FROM public.pms_time_entries WHERE tenant_id = $1 AND matter_code = $2 ORDER BY entry_date DESC, time_id DESC',
+          `SELECT ${PMS_TIME_ENTRIES_SELECT} FROM public.pms_time_entries WHERE tenant_id = $1 AND matter_code = $2 ORDER BY entry_date DESC, time_id DESC`,
           [ctx.tenantId, matterCode],
         ),
         tx.query<DbGenericPayloadRow>(
-          'SELECT * FROM public.pms_disbursements WHERE tenant_id = $1 AND matter_code = $2 ORDER BY entry_date DESC, disbursement_id DESC',
+          `SELECT ${PMS_DISBURSEMENTS_SELECT} FROM public.pms_disbursements WHERE tenant_id = $1 AND matter_code = $2 ORDER BY entry_date DESC, disbursement_id DESC`,
           [ctx.tenantId, matterCode],
         ),
         tx.query<DbGenericPayloadRow>(
@@ -2958,7 +3454,7 @@ export class TenantPmsRepository extends TenantScopedRepository {
       if (matters.length === 0) return null;
       const clientRes = matters[0]!.client_code
         ? await tx.query<DbGenericPayloadRow>(
-            'SELECT * FROM public.pms_clients WHERE tenant_id = $1 AND client_code = $2',
+            `SELECT ${PMS_CLIENTS_SELECT} FROM public.pms_clients WHERE tenant_id = $1 AND client_code = $2`,
             [ctx.tenantId, matters[0]!.client_code],
           )
         : { rows: [] as DbGenericPayloadRow[] };
@@ -3060,15 +3556,15 @@ export class TenantPmsRepository extends TenantScopedRepository {
       }
       const [feRes, cRes, mRes] = await Promise.all([
         tx.query<DbGenericPayloadRow>(
-          'SELECT * FROM public.pms_fee_earners WHERE tenant_id = $1 ORDER BY fee_earner_id ASC',
+          `SELECT ${PMS_FEE_EARNERS_SELECT} FROM public.pms_fee_earners WHERE tenant_id = $1 ORDER BY fee_earner_id ASC`,
           [ctx.tenantId],
         ),
         tx.query<DbGenericPayloadRow>(
-          'SELECT * FROM public.pms_clients WHERE tenant_id = $1 AND client_code = ANY($2::text[]) ORDER BY client_code ASC',
+          `SELECT ${PMS_CLIENTS_SELECT} FROM public.pms_clients WHERE tenant_id = $1 AND client_code = ANY($2::text[]) ORDER BY client_code ASC`,
           [ctx.tenantId, cleanCodes],
         ),
         tx.query<DbGenericPayloadRow>(
-          'SELECT * FROM public.pms_matters WHERE tenant_id = $1 AND client_code = ANY($2::text[]) ORDER BY matter_code ASC',
+          `SELECT ${PMS_MATTERS_SELECT} FROM public.pms_matters WHERE tenant_id = $1 AND client_code = ANY($2::text[]) ORDER BY matter_code ASC`,
           [ctx.tenantId, cleanCodes],
         ),
       ]);
@@ -3085,11 +3581,11 @@ export class TenantPmsRepository extends TenantScopedRepository {
       }
       const [estRes, invRes, payRes, teRes, disbRes, caRes] = await Promise.all([
         tx.query<DbGenericPayloadRow>(
-          'SELECT * FROM public.pms_fee_estimates WHERE tenant_id = $1 AND matter_code = ANY($2::text[]) ORDER BY estimate_date ASC, estimate_id ASC',
+          `SELECT ${PMS_FEE_ESTIMATES_SELECT} FROM public.pms_fee_estimates WHERE tenant_id = $1 AND matter_code = ANY($2::text[]) ORDER BY estimate_date ASC, estimate_id ASC`,
           [ctx.tenantId, matterCodes],
         ),
         tx.query<DbGenericPayloadRow>(
-          'SELECT * FROM public.pms_invoices WHERE tenant_id = $1 AND matter_code = ANY($2::text[]) ORDER BY invoice_date DESC, invoice_number DESC',
+          `SELECT ${PMS_INVOICES_SELECT} FROM public.pms_invoices WHERE tenant_id = $1 AND matter_code = ANY($2::text[]) ORDER BY invoice_date DESC, invoice_number DESC`,
           [ctx.tenantId, matterCodes],
         ),
         tx.query<DbGenericPayloadRow>(
@@ -3097,11 +3593,11 @@ export class TenantPmsRepository extends TenantScopedRepository {
           [ctx.tenantId, matterCodes],
         ),
         tx.query<DbGenericPayloadRow>(
-          'SELECT * FROM public.pms_time_entries WHERE tenant_id = $1 AND matter_code = ANY($2::text[]) ORDER BY entry_date DESC, time_id DESC',
+          `SELECT ${PMS_TIME_ENTRIES_SELECT} FROM public.pms_time_entries WHERE tenant_id = $1 AND matter_code = ANY($2::text[]) ORDER BY entry_date DESC, time_id DESC`,
           [ctx.tenantId, matterCodes],
         ),
         tx.query<DbGenericPayloadRow>(
-          'SELECT * FROM public.pms_disbursements WHERE tenant_id = $1 AND matter_code = ANY($2::text[]) ORDER BY entry_date DESC, disbursement_id DESC',
+          `SELECT ${PMS_DISBURSEMENTS_SELECT} FROM public.pms_disbursements WHERE tenant_id = $1 AND matter_code = ANY($2::text[]) ORDER BY entry_date DESC, disbursement_id DESC`,
           [ctx.tenantId, matterCodes],
         ),
         tx.query<DbGenericPayloadRow>(
@@ -3175,23 +3671,23 @@ export class TenantPmsRepository extends TenantScopedRepository {
       ] = await Promise.all([
         this.getExtractInfoInTx(tx, ctx),
         tx.query<DbGenericPayloadRow>(
-          'SELECT * FROM public.pms_fee_earners WHERE tenant_id = $1 ORDER BY fee_earner_id ASC',
+          `SELECT ${PMS_FEE_EARNERS_SELECT} FROM public.pms_fee_earners WHERE tenant_id = $1 ORDER BY fee_earner_id ASC`,
           [ctx.tenantId],
         ),
         tx.query<DbGenericPayloadRow>(
-          'SELECT * FROM public.pms_clients WHERE tenant_id = $1 ORDER BY client_code ASC',
+          `SELECT ${PMS_CLIENTS_SELECT} FROM public.pms_clients WHERE tenant_id = $1 ORDER BY client_code ASC`,
           [ctx.tenantId],
         ),
         tx.query<DbGenericPayloadRow>(
-          `SELECT * FROM public.pms_matters WHERE tenant_id = $1${excludeClause} ORDER BY matter_code ASC`,
+          `SELECT ${PMS_MATTERS_SELECT} FROM public.pms_matters WHERE tenant_id = $1${excludeClause} ORDER BY matter_code ASC`,
           args,
         ),
         tx.query<DbGenericPayloadRow>(
-          `SELECT * FROM public.pms_fee_estimates WHERE tenant_id = $1${excludeClause} ORDER BY estimate_date ASC, estimate_id ASC`,
+          `SELECT ${PMS_FEE_ESTIMATES_SELECT} FROM public.pms_fee_estimates WHERE tenant_id = $1${excludeClause} ORDER BY estimate_date ASC, estimate_id ASC`,
           args,
         ),
         tx.query<DbGenericPayloadRow>(
-          `SELECT * FROM public.pms_invoices WHERE tenant_id = $1${excludeClause} ORDER BY invoice_date DESC, invoice_number DESC`,
+          `SELECT ${PMS_INVOICES_SELECT} FROM public.pms_invoices WHERE tenant_id = $1${excludeClause} ORDER BY invoice_date DESC, invoice_number DESC`,
           args,
         ),
         tx.query<DbGenericPayloadRow>(
@@ -3199,11 +3695,11 @@ export class TenantPmsRepository extends TenantScopedRepository {
           args,
         ),
         tx.query<DbGenericPayloadRow>(
-          `SELECT * FROM public.pms_time_entries WHERE tenant_id = $1${excludeClause} ORDER BY entry_date DESC, time_id DESC`,
+          `SELECT ${PMS_TIME_ENTRIES_SELECT} FROM public.pms_time_entries WHERE tenant_id = $1${excludeClause} ORDER BY entry_date DESC, time_id DESC`,
           args,
         ),
         tx.query<DbGenericPayloadRow>(
-          `SELECT * FROM public.pms_disbursements WHERE tenant_id = $1${excludeClause} ORDER BY entry_date DESC, disbursement_id DESC`,
+          `SELECT ${PMS_DISBURSEMENTS_SELECT} FROM public.pms_disbursements WHERE tenant_id = $1${excludeClause} ORDER BY entry_date DESC, disbursement_id DESC`,
           args,
         ),
         tx.query<DbGenericPayloadRow>(
@@ -3263,15 +3759,15 @@ export class TenantPmsRepository extends TenantScopedRepository {
         this.getExtractInfoInTx(tx, ctx),
         this.listPmsLinksInTx(tx, ctx),
         tx.query<DbGenericPayloadRow>(
-          'SELECT * FROM public.pms_fee_earners WHERE tenant_id = $1 ORDER BY fee_earner_id ASC',
+          `SELECT ${PMS_FEE_EARNERS_SELECT} FROM public.pms_fee_earners WHERE tenant_id = $1 ORDER BY fee_earner_id ASC`,
           [ctx.tenantId],
         ),
         tx.query<DbGenericPayloadRow>(
-          'SELECT * FROM public.pms_clients WHERE tenant_id = $1 ORDER BY client_code ASC',
+          `SELECT ${PMS_CLIENTS_SELECT} FROM public.pms_clients WHERE tenant_id = $1 ORDER BY client_code ASC`,
           [ctx.tenantId],
         ),
         tx.query<DbGenericPayloadRow>(
-          'SELECT * FROM public.pms_matters WHERE tenant_id = $1 ORDER BY matter_code ASC',
+          `SELECT ${PMS_MATTERS_SELECT} FROM public.pms_matters WHERE tenant_id = $1 ORDER BY matter_code ASC`,
           [ctx.tenantId],
         ),
       ]);

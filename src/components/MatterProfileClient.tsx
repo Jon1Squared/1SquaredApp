@@ -27,6 +27,12 @@ import {
   ShieldCheck,
 } from 'lucide-react';
 import {
+  minorUnitsToPounds,
+  poundsToMinorUnits,
+  subtractMinorUnits,
+  sumMinorUnits,
+} from '@platform/core-api';
+import {
   addNoteAction,
   liftMatterRestrictionAction,
   openProspectiveMatterAction,
@@ -74,6 +80,7 @@ import {
   resolveMatterRiskAssessment,
 } from '@/domain/matterOpeningRecord';
 import { hrefForId, personDisplayName } from '@/domain/names';
+import { resolvePmsPence } from '@/domain/pms';
 import type {
   AppRole,
   AuditEntry,
@@ -711,17 +718,41 @@ export function MatterProfileClient({
       };
     }
 
-    const budget =
-      (pmsFin.fee_estimate && pmsFin.fee_estimate > 0 ? pmsFin.fee_estimate : null) ??
-      matter.agreedFeeCapGbp ??
-      matter.feeEstimateGbp ??
-      0;
-    const totalBilled = pmsFin.fees_billed;
+    const budgetPence =
+      pmsFin.fee_estimate && pmsFin.fee_estimate > 0
+        ? resolvePmsPence(pmsFin.fee_estimate_pence, pmsFin.fee_estimate)
+        : matter.agreedFeeCapGbp !== null && matter.agreedFeeCapGbp !== undefined
+          ? poundsToMinorUnits(matter.agreedFeeCapGbp)
+          : matter.feeEstimateGbp !== null && matter.feeEstimateGbp !== undefined
+            ? poundsToMinorUnits(matter.feeEstimateGbp)
+            : 0;
+    const budget = minorUnitsToPounds(budgetPence);
+    const totalBilledPence = resolvePmsPence(pmsFin.fees_billed_pence, pmsFin.fees_billed);
+    const billedUnpaidPence = resolvePmsPence(
+      pmsFin.outstanding_debt_pence,
+      pmsFin.outstanding_debt,
+    );
     const billedUnpaid = pmsFin.outstanding_debt;
-    const billedPaid = Math.max(0, totalBilled - billedUnpaid);
+    const billedPaidPence = Math.max(
+      0,
+      subtractMinorUnits(totalBilledPence, billedUnpaidPence),
+    );
+    const billedPaid = minorUnitsToPounds(billedPaidPence);
+    const unbilledWipPence = resolvePmsPence(
+      pmsFin.unbilled_wip_pence,
+      pmsFin.unbilled_wip,
+    );
     const unbilledWip = pmsFin.unbilled_wip;
-    const usedTotal = billedPaid + billedUnpaid + unbilledWip;
-    const remainingBudget = Math.max(0, budget - usedTotal);
+    const usedTotalPence = sumMinorUnits([
+      billedPaidPence,
+      billedUnpaidPence,
+      unbilledWipPence,
+    ]);
+    const usedTotal = minorUnitsToPounds(usedTotalPence);
+    const remainingBudget = Math.max(
+      0,
+      minorUnitsToPounds(subtractMinorUnits(budgetPence, usedTotalPence)),
+    );
     const budgetUsedPct = budget > 0 ? Math.min(100, Math.round((usedTotal / budget) * 100)) : 0;
     const matterProgressPct = Math.min(
       100,

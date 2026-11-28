@@ -6,7 +6,10 @@ import {
   CORE_REQUIRED_SCHEMA_VERSION,
   CORE_TENANT_MIGRATIONS,
   createDirectMigrationClient,
+  getPlatformTelemetryRecorder,
   NON_LIVE_AUDIT_RESET_MIGRATION_0008,
+  PMS_MONEY_AND_RETAINER_PENCE_MIGRATION_0027,
+  PMS_PENCE_MIGRATION_0027_COLUMNS,
   resolveTenantFromVerifiedToken,
   TenantCatalogueRepository,
   TenantEvidenceArtifactRepository,
@@ -18,11 +21,14 @@ import {
   TenantScopedRepository,
   TenantTaskWorkflowRepository,
   validateTenantRegistry,
+  verifyPmsMoneyPenceConversionInClient,
   type TenantChoiceValueRecord,
   type TenantContext,
   type TenantMigrationDefinition,
   type TenantRegistry,
 } from '@platform/core';
+import { parsePmsWorkbookDataset } from '@/pms/importPms';
+import { loadCommittedSeedStore } from '@/seed/seedSnapshot';
 import {
   computeOrganisationLookupKeys,
   computePersonLookupKeys,
@@ -264,6 +270,7 @@ describe('S0-14: Real PostgreSQL 16 TenantScopedRepository, SET LOCAL ROLE, R402
       ]),
     );
     expect(activeAt0017).not.toContain('matter_restriction_metadata');
+    expect(await runner.rollbackVersion(ctx, '0027')).toBe(true);
     expect(await runner.rollbackVersion(ctx, '0026')).toBe(true);
     expect(await runner.rollbackVersion(ctx, '0025')).toBe(true);
     expect(await runner.rollbackVersion(ctx, '0024')).toBe(true);
@@ -2835,7 +2842,7 @@ describe('S0-14: Real PostgreSQL 16 TenantScopedRepository, SET LOCAL ROLE, R402
   }, 30_000);
 
   it('S1-05 (ADR 0040 / R743 / R744): 0026_opening_gate_overrides_and_numbering_expand expands safely without GRANTs or unique matter_number index, backfills sequence metadata leaving duplicate rows untouched, supports override CRUD + immutability, and round-trips up -> down -> up', async () => {
-    expect(CORE_REQUIRED_SCHEMA_VERSION).toBe('0026');
+    expect(Number(CORE_REQUIRED_SCHEMA_VERSION)).toBeGreaterThanOrEqual(26);
     const mig0026 = CORE_TENANT_MIGRATIONS.find((m) => m.version === '0026');
     expect(mig0026).toBeDefined();
     expect(mig0026!.upSql).not.toMatch(/\bGRANT\b/i);
@@ -3024,4 +3031,734 @@ describe('S0-14: Real PostgreSQL 16 TenantScopedRepository, SET LOCAL ROLE, R402
       await poolManager.closeAllPools();
     }
   }, 30_000);
+
+  it('S1-12 (ADR 0041 / R820): 0027_pms_money_and_retainer_pence_expand converts 20 PMS columns + retainer funds to BIGINT pence (leaving wip_hours & hours DOUBLE PRECISION and payload_json untouched), verifies half-penny ties & zero-PII telemetry across two tenants, and round-trips up -> down -> up', async () => {
+    expect(Number(CORE_REQUIRED_SCHEMA_VERSION)).toBeGreaterThanOrEqual(27);
+    const mig0027 = CORE_TENANT_MIGRATIONS.find((m) => m.version === '0027');
+    expect(mig0027).toBeDefined();
+    expect(mig0027!.upSql).not.toMatch(/\bGRANT\b/i);
+    expect(PMS_PENCE_MIGRATION_0027_COLUMNS).toHaveLength(20);
+
+    const tenantAlpha = 'mig-s112-0027-alpha';
+    const tenantBravo = 'mig-s112-0027-bravo';
+    await provisionPostgresClusterRolesAndDatabases({
+      tenants: [
+        { tenantId: tenantAlpha, environment: 'test' },
+        { tenantId: tenantBravo, environment: 'test' },
+      ],
+    });
+    const ctxAlpha = makeTestTenantContext(tenantAlpha);
+    const ctxBravo = makeTestTenantContext(tenantBravo);
+    const runner = new TenantMigrationRunner();
+
+    const pre0027 = CORE_TENANT_MIGRATIONS.filter((m) => m.version !== '0027');
+    await runner.applyUp(ctxAlpha, pre0027);
+    await runner.rollbackVersion(ctxAlpha, '0027');
+    await runner.applyUp(ctxBravo, pre0027);
+    await runner.rollbackVersion(ctxBravo, '0027');
+
+    const alphaPayloadMarker = {
+      credit_limit: 50000.25,
+      annual_target_fees: 245000.75,
+      note: 'Client Sensitive Title Must Never Appear In Telemetry',
+    };
+
+    const seedPre0027Tenant = async (
+      ctx: TenantContext,
+      multiplier: number,
+      retainerText: string | null,
+    ): Promise<void> => {
+      const direct = await createDirectMigrationClient({ ctx });
+      try {
+        await direct.query('DELETE FROM public.pms_credit_control_log WHERE tenant_id = $1', [ctx.tenantId]);
+        await direct.query('DELETE FROM public.pms_client_account_entries WHERE tenant_id = $1', [ctx.tenantId]);
+        await direct.query('DELETE FROM public.pms_disbursements WHERE tenant_id = $1', [ctx.tenantId]);
+        await direct.query('DELETE FROM public.pms_time_entries WHERE tenant_id = $1', [ctx.tenantId]);
+        await direct.query('DELETE FROM public.pms_payments WHERE tenant_id = $1', [ctx.tenantId]);
+        await direct.query('DELETE FROM public.pms_invoices WHERE tenant_id = $1', [ctx.tenantId]);
+        await direct.query('DELETE FROM public.pms_fee_estimates WHERE tenant_id = $1', [ctx.tenantId]);
+        await direct.query('DELETE FROM public.pms_matter_financials WHERE tenant_id = $1', [ctx.tenantId]);
+        await direct.query('DELETE FROM public.pms_matters WHERE tenant_id = $1', [ctx.tenantId]);
+        await direct.query('DELETE FROM public.pms_clients WHERE tenant_id = $1', [ctx.tenantId]);
+        await direct.query('DELETE FROM public.pms_fee_earners WHERE tenant_id = $1', [ctx.tenantId]);
+        await direct.query('DELETE FROM public.matters WHERE tenant_id = $1', [ctx.tenantId]);
+
+        await direct.query(
+          `INSERT INTO public.pms_fee_earners (tenant_id, fee_earner_id, name, grade, department, office, charge_out_rate, status, payload_json)
+           VALUES ($1, 'FE-1', 'Gareth Davies', 'Partner', 'Corporate', 'Cardiff', $2, 'Active', $3::jsonb)`,
+          [ctx.tenantId, 325.5 * multiplier, JSON.stringify({ annual_target_fees: alphaPayloadMarker.annual_target_fees })],
+        );
+        await direct.query(
+          `INSERT INTO public.pms_clients (tenant_id, client_code, client_name, client_type, company_number, payload_json)
+           VALUES ($1, 'CLI-1', 'Cambria Holdings Ltd', 'Organisation', '12345678', $2::jsonb)`,
+          [ctx.tenantId, JSON.stringify({ credit_limit: alphaPayloadMarker.credit_limit, note: alphaPayloadMarker.note })],
+        );
+        await direct.query(
+          `INSERT INTO public.pms_matters (tenant_id, matter_code, client_code, matter_description, department, work_type, responsible_partner_id, acting_fee_earner_id, billing_basis, fee_estimate, matter_status, payload_json)
+           VALUES ($1, 'MAT-1', 'CLI-1', 'Confidential Acquisition', 'Corporate', 'M&A', 'FE-1', 'FE-1', 'Hourly', 19.995 * $2, 'Open', '{"fixed_fee_amount":12500.50}'::jsonb)`,
+          [ctx.tenantId, multiplier],
+        );
+        await direct.query(
+          `INSERT INTO public.pms_matter_financials (
+             tenant_id, matter_code, client_code, matter_description, department, work_type,
+             responsible_partner_id, acting_fee_earner_id, billing_basis, matter_status,
+             current_fee_estimate, wip_hours, wip_value, total_time_value,
+             billed_fees_ex_vat, billed_disb_ex_vat, billed_vat, billed_total_inc_vat,
+             cash_received, outstanding_debt, unbilled_disbursements, client_account_balance, payload_json
+           ) VALUES (
+             $1, 'MAT-1', 'CLI-1', 'Confidential Acquisition', 'Corporate', 'M&A',
+             'FE-1', 'FE-1', 'Hourly', 'Open',
+             19.995, 12.75, 4250.25, 9123.45,
+             5000.00, 250.50, 1000.00, 6250.50,
+             -19.995, 6270.495, 105.005, -0.0, '{"tag":"keep"}'::jsonb
+           )`,
+          [ctx.tenantId],
+        );
+        await direct.query(
+          `INSERT INTO public.pms_fee_estimates (tenant_id, estimate_id, matter_code, version, estimate_date, estimated_fees_ex_vat, payload_json)
+           VALUES ($1, 'EST-1', 'MAT-1', 1, '2026-10-01', 1500.005, '{"disbursements_estimate":300.25}'::jsonb)`,
+          [ctx.tenantId],
+        );
+        await direct.query(
+          `INSERT INTO public.pms_invoices (tenant_id, invoice_number, matter_code, client_code, invoice_date, due_date, status, total_inc_vat, payload_json)
+           VALUES
+             ($1, 'INV-1', 'MAT-1', 'CLI-1', '2026-10-01', '2026-10-31', 'Issued', 1200.55, '{"fees_net":1000.46,"disbursements_net":0,"vat":200.09}'::jsonb),
+             ($1, 'CN-1', 'MAT-1', 'CLI-1', '2026-10-15', '2026-10-15', 'Issued', -19.995, '{"fees_net":-19.995}'::jsonb)`,
+          [ctx.tenantId],
+        );
+        await direct.query(
+          `INSERT INTO public.pms_payments (tenant_id, receipt_id, invoice_number, matter_code, client_code, payment_date, amount, payload_json)
+           VALUES ($1, 'PAY-1', 'INV-1', 'MAT-1', 'CLI-1', '2026-10-10', 500.005, '{}'::jsonb)`,
+          [ctx.tenantId],
+        );
+        await direct.query(
+          `INSERT INTO public.pms_time_entries (tenant_id, time_id, matter_code, fee_earner_id, entry_date, hours, value, billing_status, invoice_number, payload_json)
+           VALUES ($1, 'TIME-1', 'MAT-1', 'FE-1', '2026-10-02', 3.25, 812.50, 'Unbilled', NULL, '{"rate":250.00,"billed_value":0,"write_off_value":0}'::jsonb)`,
+          [ctx.tenantId],
+        );
+        await direct.query(
+          `INSERT INTO public.pms_disbursements (tenant_id, disbursement_id, matter_code, entry_date, amount_ex_vat, billing_status, payload_json)
+           VALUES ($1, 'DISB-1', 'MAT-1', '2026-10-03', 105.005, 'Unbilled', '{"vat_amount":21.00,"gross_amount":126.01}'::jsonb)`,
+          [ctx.tenantId],
+        );
+        await direct.query(
+          `INSERT INTO public.pms_client_account_entries (tenant_id, transaction_id, matter_code, client_code, entry_date, direction, amount, balance_after, payload_json)
+           VALUES
+             ($1, 'CA-1', 'MAT-1', 'CLI-1', '2026-10-01', 'Receipt', 1000.005, 1000.005, '{}'::jsonb),
+             ($1, 'CA-2', 'MAT-1', 'CLI-1', '2026-10-04', 'Payment', -0.005, 1000.00, '{}'::jsonb)`,
+          [ctx.tenantId],
+        );
+        await direct.query(
+          `INSERT INTO public.matters (
+             tenant_id, id, row_version, matter_number, title, client_type, client_id,
+             practice_area_id, work_type_subcategory_id, status_id, current_stage_id,
+             risk_rating_id, conflict_check_status, costs_json, opening_record_json
+           ) VALUES
+             ($1, 'M-RET-1', 1, 'MAT-001', 'Matter With Retainer', 'organisation', 'O-1', 'pa.1', 'wt.1', 'matter_status.active', 'stage.1', 'risk_rating.low', 'Cleared', $2::jsonb, $3::jsonb),
+             ($1, 'M-RET-NULL', 1, 'MAT-002', 'Matter Without Retainer', 'organisation', 'O-1', 'pa.1', 'wt.1', 'matter_status.active', 'stage.1', 'risk_rating.low', 'Cleared', '{}'::jsonb, '{}'::jsonb)`,
+          [
+            ctx.tenantId,
+            retainerText !== null
+              ? JSON.stringify({ retainerMoniesOnAccountGbp: Number(retainerText) })
+              : '{}',
+            retainerText !== null
+              ? JSON.stringify({ retainerMoniesOnAccountGbp: Number(retainerText) })
+              : '{}',
+          ],
+        );
+      } finally {
+        await direct.end();
+      }
+    };
+
+    await seedPre0027Tenant(ctxAlpha, 1, '450.50');
+    await seedPre0027Tenant(ctxBravo, 2, '999.995');
+
+    getPlatformTelemetryRecorder().clearForTesting();
+    const pgHost = process.env.PLATFORM_POSTGRES_HOST?.trim() || '127.0.0.1';
+    const sweepRegistry: TenantRegistry = {
+      schemaVersion: '1.0.0',
+      environment: 'test',
+      hostingMode: 'multi_tenant',
+      tenants: [
+        {
+          tenantId: tenantAlpha,
+          slug: 'mig_s112_0027_alpha',
+          environment: 'test',
+          postgresHost: pgHost,
+          postgresDatabaseName: ctxAlpha.postgresDatabaseName,
+          postgresRoleName: 'role_tenant_mig_s112_0027_alpha_test',
+          keyVaultUri: 'https://kv-s112-alpha.vault.azure.net/',
+          packageDir: 'client-not-a-law-firm',
+          timeZone: 'Europe/London',
+          enabled: true,
+        },
+        {
+          tenantId: tenantBravo,
+          slug: 'mig_s112_0027_bravo',
+          environment: 'test',
+          postgresHost: pgHost,
+          postgresDatabaseName: ctxBravo.postgresDatabaseName,
+          postgresRoleName: 'role_tenant_mig_s112_0027_bravo_test',
+          keyVaultUri: 'https://kv-s112-bravo.vault.azure.net/',
+          packageDir: 'client-not-a-law-firm',
+          timeZone: 'Europe/London',
+          enabled: true,
+        },
+      ],
+    };
+
+    const sweepRes = await runMigrateJobSweep({
+      registry: sweepRegistry,
+    });
+    expect(sweepRes.exitCode).toBe(0);
+    expect(sweepRes.succeededTenants).toEqual([tenantAlpha, tenantBravo]);
+
+    // Verify structured telemetry contains ONLY counts and differences — zero money sums or client PII
+    const telemetryEvents = getPlatformTelemetryRecorder()
+      .getRecentEntries()
+      .filter((e) => e.eventName === 'job.migrate.pms_pence_verified');
+    expect(telemetryEvents).toHaveLength(2);
+    for (const evt of telemetryEvents) {
+      expect(evt.properties.tablesVerified).toBe(10);
+      expect(evt.properties.totalColumnsVerified).toBe(21);
+      expect(evt.properties.mismatchCount).toBe(0);
+      const serialized = JSON.stringify(evt);
+      expect(serialized).not.toContain('Cambria');
+      expect(serialized).not.toContain('Confidential Acquisition');
+      expect(serialized).not.toContain('Client Sensitive Title');
+      expect(serialized).not.toContain('9123.45');
+    }
+
+    const alphaDirect = await createDirectMigrationClient({ ctx: ctxAlpha });
+    const bravoDirect = await createDirectMigrationClient({ ctx: ctxBravo });
+    try {
+      // 1. Schema check: 20 BIGINT *_pence + retainer_monies_on_account_pence + wip_hours/hours remain DOUBLE PRECISION
+      const colsRes = await alphaDirect.query<{
+        table_name: string;
+        column_name: string;
+        data_type: string;
+        is_nullable: string;
+      }>(
+        `SELECT table_name, column_name, data_type, is_nullable
+           FROM information_schema.columns
+          WHERE table_schema = 'public'
+            AND (
+              (table_name LIKE 'pms_%' AND (column_name LIKE '%_pence' OR column_name IN ('wip_hours', 'hours')))
+              OR (table_name = 'matters' AND column_name = 'retainer_monies_on_account_pence')
+            )
+          ORDER BY table_name ASC, column_name ASC`,
+      );
+      const colTypeMap = new Map(
+        colsRes.rows.map((r) => [`${r.table_name}.${r.column_name}`, r]),
+      );
+      for (const spec of PMS_PENCE_MIGRATION_0027_COLUMNS) {
+        const meta = colTypeMap.get(`${spec.table}.${spec.penceColumn}`);
+        expect(meta).toBeDefined();
+        expect(meta!.data_type).toBe('bigint');
+        expect(meta!.is_nullable).toBe('NO');
+      }
+      expect(colTypeMap.get('pms_matter_financials.wip_hours')?.data_type).toBe('double precision');
+      expect(colTypeMap.get('pms_time_entries.hours')?.data_type).toBe('double precision');
+      expect(colTypeMap.get('matters.retainer_monies_on_account_pence')?.data_type).toBe('bigint');
+      expect(colTypeMap.get('matters.retainer_monies_on_account_pence')?.is_nullable).toBe('YES');
+
+      // 2. Verify converted half-away-from-zero values & untouched payload_json & hours
+      const mfAlpha = await alphaDirect.query<{
+        current_fee_estimate_pence: string;
+        wip_hours: number;
+        cash_received_pence: string;
+        client_account_balance_pence: string;
+      }>(
+        `SELECT current_fee_estimate_pence::text, wip_hours, cash_received_pence::text, client_account_balance_pence::text
+           FROM public.pms_matter_financials WHERE tenant_id = $1 AND matter_code = 'MAT-1'`,
+        [tenantAlpha],
+      );
+      expect(mfAlpha.rows[0]).toEqual({
+        current_fee_estimate_pence: '2000',
+        wip_hours: 12.75,
+        cash_received_pence: '-2000',
+        client_account_balance_pence: '0',
+      });
+
+      const caAlpha = await alphaDirect.query<{
+        transaction_id: string;
+        amount_pence: string;
+        balance_after_pence: string;
+      }>(
+        `SELECT transaction_id, amount_pence::text, balance_after_pence::text
+           FROM public.pms_client_account_entries WHERE tenant_id = $1 ORDER BY transaction_id ASC`,
+        [tenantAlpha],
+      );
+      expect(caAlpha.rows).toEqual([
+        { transaction_id: 'CA-1', amount_pence: '100001', balance_after_pence: '100001' },
+        { transaction_id: 'CA-2', amount_pence: '-1', balance_after_pence: '100000' },
+      ]);
+
+      const mattersAlpha = await alphaDirect.query<{
+        id: string;
+        retainer_monies_on_account_pence: string | null;
+      }>(
+        `SELECT id, retainer_monies_on_account_pence::text FROM public.matters WHERE tenant_id = $1 ORDER BY id ASC`,
+        [tenantAlpha],
+      );
+      expect(mattersAlpha.rows).toEqual([
+        { id: 'M-RET-1', retainer_monies_on_account_pence: '45050' },
+        { id: 'M-RET-NULL', retainer_monies_on_account_pence: null },
+      ]);
+
+      const mattersBravo = await bravoDirect.query<{
+        id: string;
+        retainer_monies_on_account_pence: string | null;
+      }>(
+        `SELECT id, retainer_monies_on_account_pence::text FROM public.matters WHERE tenant_id = $1 ORDER BY id ASC`,
+        [tenantBravo],
+      );
+      expect(mattersBravo.rows).toEqual([
+        { id: 'M-RET-1', retainer_monies_on_account_pence: '100000' },
+        { id: 'M-RET-NULL', retainer_monies_on_account_pence: null },
+      ]);
+
+      // payload_json left untouched in SQL
+      const cliAlpha = await alphaDirect.query<{ payload_json: Record<string, unknown> }>(
+        `SELECT payload_json FROM public.pms_clients WHERE tenant_id = $1 AND client_code = 'CLI-1'`,
+        [tenantAlpha],
+      );
+      expect(cliAlpha.rows[0]?.payload_json).toEqual({
+        credit_limit: 50000.25,
+        note: alphaPayloadMarker.note,
+      });
+
+      // 3. Rollback down -> verifies columns dropped & legacy floats preserved -> re-up round-trip
+      expect(await runner.rollbackVersion(ctxAlpha, '0027')).toBe(true);
+      const penceColsDown = await alphaDirect.query<{ column_name: string }>(
+        `SELECT column_name
+           FROM information_schema.columns
+          WHERE table_schema = 'public'
+            AND (
+              (table_name LIKE 'pms_%' AND column_name LIKE '%_pence')
+              OR (table_name = 'matters' AND column_name = 'retainer_monies_on_account_pence')
+            )`,
+      );
+      expect(penceColsDown.rowCount).toBe(0);
+
+      const legacyStillIntact = await alphaDirect.query<{ total_inc_vat: number }>(
+        `SELECT total_inc_vat FROM public.pms_invoices WHERE tenant_id = $1 AND invoice_number = 'INV-1'`,
+        [tenantAlpha],
+      );
+      expect(legacyStillIntact.rows[0]?.total_inc_vat).toBe(1200.55);
+
+      const reapplied = await runner.applyUp(ctxAlpha, CORE_TENANT_MIGRATIONS);
+      expect(reapplied.map((m) => m.version)).toEqual(['0027']);
+      expect(reapplied[0]?.verificationMetadata?.pmsPenceVerification).toMatchObject({
+        tablesVerified: 10,
+        totalColumnsVerified: 21,
+        mismatchCount: 0,
+      });
+    } finally {
+      await alphaDirect.end();
+      await bravoDirect.end();
+    }
+  }, 45_000);
+
+  it('R820: fails closed and rolls back 0027 cleanly when a pence column is corrupted after backfill or when a source float is NaN', async () => {
+    const tenantId = 'mig-s112-0027-fail';
+    await provisionPostgresClusterRolesAndDatabases({
+      tenants: [{ tenantId, environment: 'test' }],
+    });
+    const ctx = makeTestTenantContext(tenantId);
+    const runner = new TenantMigrationRunner();
+
+    const pre0027 = CORE_TENANT_MIGRATIONS.filter((m) => m.version !== '0027');
+    await runner.applyUp(ctx, pre0027);
+    await runner.rollbackVersion(ctx, '0027');
+
+    const base0027 = PMS_MONEY_AND_RETAINER_PENCE_MIGRATION_0027;
+    const direct = await createDirectMigrationClient({ ctx });
+    try {
+      await direct.query('DELETE FROM public.pms_invoices WHERE tenant_id = $1', [tenantId]);
+      await direct.query(
+        `INSERT INTO public.pms_invoices (tenant_id, invoice_number, matter_code, client_code, invoice_date, due_date, status, total_inc_vat, payload_json)
+         VALUES ($1, 'INV-CORRUPT', 'MAT-1', 'CLI-1', '2026-10-01', '2026-10-31', 'Issued', 100.00, '{}'::jsonb)`,
+        [tenantId],
+      );
+    } finally {
+      await direct.end();
+    }
+
+    // 1. Corrupt *_pence value AFTER backfill, BEFORE independent check -> PMS_PENCE_CONVERSION_MISMATCH + rollback
+    const corrupting0027: TenantMigrationDefinition = {
+      ...base0027,
+      afterUpSql: async (client, c) => {
+        await client.query(
+          `UPDATE public.pms_invoices
+              SET total_inc_vat_pence = total_inc_vat_pence + 2
+            WHERE tenant_id = $1 AND invoice_number = 'INV-CORRUPT'`,
+          [c.tenantId],
+        );
+        await verifyPmsMoneyPenceConversionInClient(client, c);
+      },
+    };
+    await expect(
+      runner.applyUp(ctx, [...pre0027, corrupting0027]),
+    ).rejects.toThrow(/PMS_PENCE_CONVERSION_MISMATCH/);
+
+    // Verify 0027 rolled back cleanly
+    const appliedAfterCorrupt = await runner.listAppliedMigrations(ctx);
+    expect(appliedAfterCorrupt.some((m) => m.version === '0027')).toBe(false);
+    const checkCol = await createDirectMigrationClient({ ctx });
+    try {
+      const colExists = await checkCol.query(
+        `SELECT 1 FROM information_schema.columns WHERE table_schema = 'public' AND table_name = 'pms_invoices' AND column_name = 'total_inc_vat_pence'`,
+      );
+      expect(colExists.rowCount).toBe(0);
+
+      // 2. Inject NaN float -> pre-check in upSql rejects cleanly and rolls back
+      await checkCol.query(
+        `UPDATE public.pms_invoices SET total_inc_vat = 'NaN'::double precision WHERE tenant_id = $1 AND invoice_number = 'INV-CORRUPT'`,
+        [tenantId],
+      );
+    } finally {
+      await checkCol.end();
+    }
+
+    await expect(runner.applyUp(ctx, CORE_TENANT_MIGRATIONS)).rejects.toThrow(
+      /PMS_PENCE_CONVERSION_MISMATCH/,
+    );
+    const appliedAfterNan = await runner.listAppliedMigrations(ctx);
+    expect(appliedAfterNan.some((m) => m.version === '0027')).toBe(false);
+
+    // Repair and apply cleanly
+    const fixClient = await createDirectMigrationClient({ ctx });
+    try {
+      await fixClient.query(
+        `UPDATE public.pms_invoices SET total_inc_vat = 100.00 WHERE tenant_id = $1 AND invoice_number = 'INV-CORRUPT'`,
+        [tenantId],
+      );
+    } finally {
+      await fixClient.end();
+    }
+    const cleanRes = await runner.applyUp(ctx, CORE_TENANT_MIGRATIONS);
+    expect(cleanRes.map((m) => m.version)).toEqual(['0027']);
+  }, 30_000);
+
+  it('S1-12 demo in-place conversion check: converts 1Squared_PMS_Demo_Data.xlsx + seed-not-a-law-firm.json across 0027 with zero mismatches', async () => {
+    const tenantId = 'mig-s112-demo-verify';
+    await provisionPostgresClusterRolesAndDatabases({
+      tenants: [{ tenantId, environment: 'test' }],
+    });
+    const ctx = makeTestTenantContext(tenantId);
+    const runner = new TenantMigrationRunner();
+
+    const pre0027 = CORE_TENANT_MIGRATIONS.filter((m) => m.version !== '0027');
+    await runner.applyUp(ctx, pre0027);
+    await runner.rollbackVersion(ctx, '0027');
+
+    const dataset = parsePmsWorkbookDataset();
+    const seedStore = loadCommittedSeedStore(REPO_ROOT);
+
+    const direct = await createDirectMigrationClient({ ctx });
+    try {
+      await direct.query('DELETE FROM public.pms_credit_control_log WHERE tenant_id = $1', [tenantId]);
+      await direct.query('DELETE FROM public.pms_client_account_entries WHERE tenant_id = $1', [tenantId]);
+      await direct.query('DELETE FROM public.pms_disbursements WHERE tenant_id = $1', [tenantId]);
+      await direct.query('DELETE FROM public.pms_time_entries WHERE tenant_id = $1', [tenantId]);
+      await direct.query('DELETE FROM public.pms_payments WHERE tenant_id = $1', [tenantId]);
+      await direct.query('DELETE FROM public.pms_invoices WHERE tenant_id = $1', [tenantId]);
+      await direct.query('DELETE FROM public.pms_fee_estimates WHERE tenant_id = $1', [tenantId]);
+      await direct.query('DELETE FROM public.pms_matter_financials WHERE tenant_id = $1', [tenantId]);
+      await direct.query('DELETE FROM public.pms_matters WHERE tenant_id = $1', [tenantId]);
+      await direct.query('DELETE FROM public.pms_clients WHERE tenant_id = $1', [tenantId]);
+      await direct.query('DELETE FROM public.pms_fee_earners WHERE tenant_id = $1', [tenantId]);
+      await direct.query('DELETE FROM public.matters WHERE tenant_id = $1', [tenantId]);
+
+      for (const fe of dataset.feeEarners) {
+        await direct.query(
+          `INSERT INTO public.pms_fee_earners (tenant_id, fee_earner_id, name, grade, department, office, charge_out_rate, status, payload_json)
+           VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9::jsonb)`,
+          [tenantId, fe.fee_earner_id, `${fe.first_name} ${fe.last_name}`, fe.grade, fe.department, 'Cardiff', fe.standard_hourly_rate, fe.active, JSON.stringify(fe)],
+        );
+      }
+      for (const c of dataset.clients) {
+        await direct.query(
+          `INSERT INTO public.pms_clients (tenant_id, client_code, client_name, client_type, company_number, payload_json)
+           VALUES ($1, $2, $3, $4, $5, $6::jsonb)`,
+          [tenantId, c.client_code, c.client_name, c.client_type, c.company_number || null, JSON.stringify(c)],
+        );
+      }
+      for (const m of dataset.matters) {
+        await direct.query(
+          `INSERT INTO public.pms_matters (tenant_id, matter_code, client_code, matter_description, department, work_type, responsible_partner_id, acting_fee_earner_id, billing_basis, fee_estimate, matter_status, open_date, close_date, payload_json)
+           VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14::jsonb)`,
+          [tenantId, m.matter_code, m.client_code, m.matter_description, m.practice_area, m.work_type, m.responsible_partner_id, m.fee_earner_id, m.billing_basis, m.fee_estimate, m.status, m.date_opened || null, m.date_closed || null, JSON.stringify(m)],
+        );
+      }
+      // Derive baseline pre-0027 matter financial floats from workbook sheets
+      const estVersion = new Map<string, number>();
+      for (const est of dataset.feeEstimates) {
+        const nextV = (estVersion.get(est.matter_code) ?? 0) + 1;
+        estVersion.set(est.matter_code, nextV);
+        await direct.query(
+          `INSERT INTO public.pms_fee_estimates (tenant_id, estimate_id, matter_code, version, estimate_date, estimated_fees_ex_vat, payload_json)
+           VALUES ($1, $2, $3, $4, $5, $6, $7::jsonb)`,
+          [tenantId, est.estimate_id, est.matter_code, nextV, est.date_given, est.fees_estimate, JSON.stringify(est)],
+        );
+      }
+      for (const inv of dataset.invoices) {
+        await direct.query(
+          `INSERT INTO public.pms_invoices (tenant_id, invoice_number, matter_code, client_code, invoice_date, due_date, status, total_inc_vat, payload_json)
+           VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9::jsonb)`,
+          [tenantId, inv.invoice_number, inv.matter_code, inv.client_code, inv.invoice_date, inv.due_date, inv.status, inv.total, JSON.stringify(inv)],
+        );
+      }
+      for (const pay of dataset.payments) {
+        await direct.query(
+          `INSERT INTO public.pms_payments (tenant_id, receipt_id, invoice_number, matter_code, client_code, payment_date, amount, payload_json)
+           VALUES ($1, $2, $3, $4, $5, $6, $7, $8::jsonb)`,
+          [tenantId, pay.receipt_id, pay.invoice_number, pay.matter_code, pay.client_code, pay.receipt_date, pay.amount, JSON.stringify(pay)],
+        );
+      }
+      for (const te of dataset.timeEntries) {
+        await direct.query(
+          `INSERT INTO public.pms_time_entries (tenant_id, time_id, matter_code, fee_earner_id, entry_date, hours, value, billing_status, invoice_number, payload_json)
+           VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10::jsonb)`,
+          [tenantId, te.time_id, te.matter_code, te.fee_earner_id, te.date, te.hours, te.value, te.billed_status, te.invoice_number ?? null, JSON.stringify(te)],
+        );
+      }
+      for (const d of dataset.disbursements) {
+        await direct.query(
+          `INSERT INTO public.pms_disbursements (tenant_id, disbursement_id, matter_code, entry_date, amount_ex_vat, billing_status, invoice_number, payload_json)
+           VALUES ($1, $2, $3, $4, $5, $6, $7, $8::jsonb)`,
+          [tenantId, d.disbursement_id, d.matter_code, d.date, d.net_amount, d.billed_status, d.invoice_number ?? null, JSON.stringify(d)],
+        );
+      }
+      const runningCaByMatter = new Map<string, number>();
+      const sortedCa = [...dataset.clientAccount].sort((a, b) =>
+        a.matter_code.localeCompare(b.matter_code) ||
+        a.date.localeCompare(b.date) ||
+        a.transaction_id.localeCompare(b.transaction_id),
+      );
+      for (const ca of sortedCa) {
+        const nextBal = Math.round(((runningCaByMatter.get(ca.matter_code) ?? 0) + ca.amount + Number.EPSILON) * 100) / 100;
+        runningCaByMatter.set(ca.matter_code, nextBal);
+        await direct.query(
+          `INSERT INTO public.pms_client_account_entries (tenant_id, transaction_id, matter_code, client_code, entry_date, direction, amount, balance_after, payload_json)
+           VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9::jsonb)`,
+          [tenantId, ca.transaction_id, ca.matter_code, ca.client_code, ca.date, ca.type, ca.amount, nextBal, JSON.stringify(ca)],
+        );
+      }
+      for (const m of dataset.matters) {
+        const wipHours = dataset.timeEntries
+          .filter((t) => t.matter_code === m.matter_code && t.billed_status === 'Unbilled')
+          .reduce((a, t) => a + t.hours, 0);
+        const wipValue = Math.round((dataset.timeEntries
+          .filter((t) => t.matter_code === m.matter_code && t.billed_status === 'Unbilled')
+          .reduce((a, t) => a + t.value, 0) + Number.EPSILON) * 100) / 100;
+        const totalTime = Math.round((dataset.timeEntries
+          .filter((t) => t.matter_code === m.matter_code)
+          .reduce((a, t) => a + t.value, 0) + Number.EPSILON) * 100) / 100;
+        const matterInvs = dataset.invoices.filter((i) => i.matter_code === m.matter_code);
+        const billedFees = Math.round((matterInvs.reduce((a, i) => a + (i.fees_net ?? 0), 0) + Number.EPSILON) * 100) / 100;
+        const billedDisb = Math.round((matterInvs.reduce((a, i) => a + (i.disbursements_net ?? 0), 0) + Number.EPSILON) * 100) / 100;
+        const billedVat = Math.round((matterInvs.reduce((a, i) => a + (i.vat ?? 0), 0) + Number.EPSILON) * 100) / 100;
+        const billedTotal = Math.round((matterInvs.reduce((a, i) => a + i.total, 0) + Number.EPSILON) * 100) / 100;
+        const cashReceived = Math.round((dataset.payments
+          .filter((p) => p.matter_code === m.matter_code)
+          .reduce((a, p) => a + p.amount, 0) + Number.EPSILON) * 100) / 100;
+        const outstandingDebt = Math.round((billedTotal - cashReceived + Number.EPSILON) * 100) / 100;
+        const unbilledDisb = Math.round((dataset.disbursements
+          .filter((d) => d.matter_code === m.matter_code && d.billed_status === 'Unbilled')
+          .reduce((a, d) => a + d.net_amount, 0) + Number.EPSILON) * 100) / 100;
+        const caBal = runningCaByMatter.get(m.matter_code) ?? 0;
+        await direct.query(
+          `INSERT INTO public.pms_matter_financials (
+             tenant_id, matter_code, client_code, matter_description, department, work_type,
+             responsible_partner_id, acting_fee_earner_id, billing_basis, matter_status,
+             current_fee_estimate, wip_hours, wip_value, total_time_value,
+             billed_fees_ex_vat, billed_disb_ex_vat, billed_vat, billed_total_inc_vat,
+             cash_received, outstanding_debt, unbilled_disbursements, client_account_balance, payload_json
+           ) VALUES (
+             $1, $2, $3, $4, $5, $6,
+             $7, $8, $9, $10,
+             $11, $12, $13, $14,
+             $15, $16, $17, $18,
+             $19, $20, $21, $22, '{}'::jsonb
+           )`,
+          [
+            tenantId, m.matter_code, m.client_code, m.matter_description, m.practice_area, m.work_type,
+            m.responsible_partner_id, m.fee_earner_id, m.billing_basis, m.status,
+            m.fee_estimate, wipHours, wipValue, totalTime,
+            billedFees, billedDisb, billedVat, billedTotal,
+            cashReceived, outstandingDebt, unbilledDisb, caBal,
+          ],
+        );
+      }
+      for (const matter of seedStore.matters) {
+        await direct.query(
+          `INSERT INTO public.matters (
+             tenant_id, id, row_version, matter_number, title, client_type, client_id,
+             practice_area_id, work_type_subcategory_id, status_id, current_stage_id,
+             risk_rating_id, conflict_check_status, costs_json, opening_record_json
+           ) VALUES ($1, $2, 1, $3, $4, 'organisation', $5, $6, $7, $8, $9, $10, $11, $12::jsonb, $13::jsonb)`,
+          [
+            tenantId,
+            matter.id,
+            matter.matterNumber,
+            matter.title,
+            matter.clientId,
+            matter.practiceAreaId,
+            matter.workTypeSubcategoryId,
+            matter.matterStatusId,
+            matter.stageId,
+            matter.riskRatingId,
+            matter.conflictCheckStatus,
+            JSON.stringify({ retainerMoniesOnAccountGbp: matter.retainerMoniesOnAccountGbp ?? null }),
+            JSON.stringify({ retainerMoniesOnAccountGbp: matter.retainerMoniesOnAccountGbp ?? null }),
+          ],
+        );
+      }
+    } finally {
+      await direct.end();
+    }
+
+    const appliedDemo = await runner.applyUp(ctx, CORE_TENANT_MIGRATIONS);
+    expect(appliedDemo.map((m) => m.version)).toEqual(['0027']);
+    const report = appliedDemo[0]?.verificationMetadata?.pmsPenceVerification as
+      | {
+          tablesVerified: number;
+          totalColumnsVerified: number;
+          totalRowsChecked: number;
+          totalNonNullChecked: number;
+          mismatchCount: number;
+          maxColumnTotalDiffPence: number;
+          columns: Array<{
+            table: string;
+            column: string;
+            sourceColumn: string;
+            rowCount: number;
+            nonNullCount: number;
+            totalDiffPence: number;
+          }>;
+        }
+      | undefined;
+    expect(report).toBeDefined();
+    expect(report!.mismatchCount).toBe(0);
+    expect(report!.tablesVerified).toBe(10);
+    expect(report!.totalColumnsVerified).toBe(21);
+    expect(report!.totalRowsChecked).toBeGreaterThan(50);
+    console.info(`[DEMO_0027_VERIFICATION] ${JSON.stringify(report)}`);
+  }, 45_000);
+
+  it('R828: runs 0027 down through the migrate CLI entry point to 0026, refuses non-newest target, and migrates back up cleanly', async () => {
+    const tenantId = 'mig-s112-down-cli';
+    const slug = 'mig_s112_down_cli';
+    await provisionPostgresClusterRolesAndDatabases({
+      tenants: [{ tenantId, environment: 'test' }],
+    });
+    const ctx = makeTestTenantContext(tenantId);
+    const registry: TenantRegistry = {
+      schemaVersion: '1.0.0',
+      environment: 'test',
+      hostingMode: 'multi_tenant',
+      tenants: [
+        {
+          tenantId,
+          slug,
+          environment: 'test',
+          postgresHost: process.env.PLATFORM_POSTGRES_HOST || '127.0.0.1',
+          postgresDatabaseName: ctx.postgresDatabaseName,
+          postgresRoleName: `role_tenant_${slug}_test`,
+          keyVaultUri: 'https://kv-migs112down-test.vault.azure.net/',
+          packageDir: 'client-not-a-law-firm',
+          timeZone: 'Europe/London',
+          enabled: true,
+        },
+      ],
+    };
+
+    const runner = new TenantMigrationRunner();
+    const { executeCliJobRunner } = await import('../../scripts/run-job');
+
+    const upSweep = await runMigrateJobSweep({ registry, runner });
+    expect(upSweep.exitCode).toBe(0);
+    expect(
+      (await runner.listAppliedMigrations(ctx)).slice(-1)[0]?.version,
+    ).toBe('0027');
+
+    // Non-newest target 0026 is refused cleanly
+    const refusedOut: string[] = [];
+    const refusedCode = await executeCliJobRunner(
+      [
+        'node',
+        'dist/jobs/run-job.mjs',
+        'migrate',
+        '--down',
+        '--target',
+        '0026',
+        '--confirm-rollback',
+      ],
+      { stdout: (l) => refusedOut.push(l), env: {}, registry, runner },
+    );
+    expect(refusedCode).toBe(1);
+    expect(JSON.parse(refusedOut[0]!)).toMatchObject({
+      event: 'job.migrate.down',
+      tenantId,
+      previousVersion: '0027',
+      targetVersion: '0026',
+      resultingVersion: '0027',
+      outcome: 'refused',
+      errorCode: 'MIGRATION_ROLLBACK_NOT_NEWEST',
+    });
+
+    // Valid target 0027 rolls back through the CLI entry point to 0026
+    const downOut: string[] = [];
+    const downCode = await executeCliJobRunner(
+      [
+        'node',
+        'dist/jobs/run-job.mjs',
+        'migrate',
+        '--down',
+        '--target',
+        '0027',
+        '--confirm-rollback',
+      ],
+      { stdout: (l) => downOut.push(l), env: {}, registry, runner },
+    );
+    expect(downCode).toBe(0);
+    expect(JSON.parse(downOut[0]!)).toEqual({
+      event: 'job.migrate.down',
+      tenantId,
+      previousVersion: '0027',
+      targetVersion: '0027',
+      resultingVersion: '0026',
+      outcome: 'rolled_back',
+    });
+
+    const appliedAfterDown = await runner.listAppliedMigrations(ctx);
+    expect(appliedAfterDown.slice(-1)[0]?.version).toBe('0026');
+
+    const direct = await createDirectMigrationClient({ ctx });
+    try {
+      const penceCols = await direct.query<{ cnt: string }>(
+        `SELECT COUNT(*)::text AS cnt
+           FROM information_schema.columns
+          WHERE table_schema = 'public'
+            AND ((table_name = 'pms_invoices' AND column_name = 'total_inc_vat_pence')
+              OR (table_name = 'matters' AND column_name = 'retainer_monies_on_account_pence'))`,
+      );
+      expect(penceCols.rows[0]?.cnt).toBe('0');
+    } finally {
+      await direct.end();
+    }
+
+    // Re-applying via migrate CLI returns to 0027 cleanly
+    const reUpCode = await executeCliJobRunner(
+      ['node', 'dist/jobs/run-job.mjs', 'migrate'],
+      { env: {}, registry, runner },
+    );
+    expect(reUpCode).toBe(0);
+    expect(
+      (await runner.listAppliedMigrations(ctx)).slice(-1)[0]?.version,
+    ).toBe('0027');
+  }, 45_000);
 });

@@ -154,6 +154,9 @@ describe('S0-13: Azure Container Apps & PostgreSQL Bicep infrastructure contract
     expect(migrateJobBlock).not.toContain("value: '6432'");
     expect(migrateJobBlock).toContain('migrateAcrPullRole');
     expect(migrateJobBlock).toContain('sharedPostgresEntraAdmin');
+    expect(migrateJobBlock).toContain("name: 'PLATFORM_MIGRATE_DOWN_TARGET'");
+    expect(migrateJobBlock).toContain("name: 'PLATFORM_MIGRATE_DOWN_CONFIRM'");
+    expect(migrateJobBlock).toContain("value: 'false'");
 
     const nonMigrateJobsBlock = platformNoComments.slice(
       platformNoComments.indexOf('resource keyDateRemindersJob'),

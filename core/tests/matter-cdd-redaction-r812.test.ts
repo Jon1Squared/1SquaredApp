@@ -1,3 +1,5 @@
+import fs from 'node:fs';
+import path from 'node:path';
 import { afterEach, beforeAll, describe, expect, it } from 'vitest';
 import {
   REDACTED_MATTER_CDD_STATUS,
@@ -20,10 +22,15 @@ import {
   updateMatterConflictRecordAction,
   updateMatterLifecycleStatusAction,
 } from '@/app/actions';
+import {
+  isMatterCmiIncompleteStatus,
+  resolveMatterStatusPill,
+} from '@/domain/matterStatusDisplay';
 import type {
   ClientPriorMatterSummary,
   MatterOpeningSnapshot,
 } from '@/domain/matterOpeningRecord';
+import { redactMatterCddInBrowserPayload } from '@/server/matterCddBoundary';
 import type {
   ConflictCheckRecordInput,
   Enquiry,
@@ -1348,4 +1355,174 @@ describe('R812: Shared CDD redaction choke point across all page loaders & serve
       { roles: ['risk_compliance'], mfaVerified: true },
     );
   }, 30_000);
+});
+
+describe('R816 / R819: Legacy active + CMI incomplete pill & filter parity without exposing CDD outcomes', () => {
+  afterEach(() => {
+    setTestActorSession(null);
+  });
+
+  it('computes isLegacyCmiIncomplete in repository regardless of canViewCdd and sets false when activeStatusIds omitted or empty', async () => {
+    const matterRepo = new TenantMatterRepository();
+    const ctx = testTenantCtx('P-000001');
+
+    const financePartnerList = await runAsActionActor(
+      'P-000001',
+      () => loadMattersListPageData('P-000001', { page: 1, pageSize: 10 }),
+      { roles: ['partner'], mfaVerified: false },
+    );
+    const activeStatusIds = financePartnerList.shell.values
+      .filter((v) => v.listKey === 'matter_status' && v.systemKey === 'active')
+      .map((v) => v.id);
+    expect(activeStatusIds.length).toBeGreaterThan(0);
+
+    const omittedIds = await matterRepo.getMatterById<Matter>(ctx, 'M-000002', {
+      viewerId: 'P-000009',
+      canViewCdd: false,
+    });
+    expect(omittedIds?.isLegacyCmiIncomplete).toBe(false);
+
+    const emptyIds = await matterRepo.getMatterById<Matter>(ctx, 'M-000002', {
+      viewerId: 'P-000009',
+      canViewCdd: false,
+      activeStatusIds: [],
+    });
+    expect(emptyIds?.isLegacyCmiIncomplete).toBe(false);
+
+    const withCdd = await matterRepo.getMatterById<Matter>(ctx, 'M-000002', {
+      viewerId: 'P-000001',
+      canViewCdd: true,
+      activeStatusIds,
+    });
+    expect(withCdd?.isLegacyCmiIncomplete).toBe(true);
+    expect(withCdd?.amlStatus).toBe('Pending');
+
+    const afterBoundaryRedaction = redactMatterCddInBrowserPayload(withCdd, false);
+    expect(afterBoundaryRedaction?.isLegacyCmiIncomplete).toBe(true);
+    expect(afterBoundaryRedaction?.amlStatus).toBe(REDACTED_MATTER_CDD_STATUS);
+
+    const redactedDirect = await matterRepo.getMatterById<Matter>(ctx, 'M-000002', {
+      viewerId: 'P-000009',
+      canViewCdd: false,
+      activeStatusIds,
+    });
+    expect(redactedDirect?.isLegacyCmiIncomplete).toBe(true);
+    expect(redactedDirect?.amlStatus).toBe(REDACTED_MATTER_CDD_STATUS);
+    expect(redactedDirect?.amlCompletedAt).toBeNull();
+  });
+
+  it('shows CMI incomplete pill & /matters filter parity on M-000002 for Finance while redacting CDD, and Open on gate-opened matters', async () => {
+    const financeList = await runAsActionActor(
+      'P-000009',
+      () => loadMattersListPageData('P-000009', { page: 1, pageSize: 200 }),
+      { roles: ['finance'], mfaVerified: false },
+    );
+    const cmiStatusId = financeList.shell.values.find(
+      (v) => v.listKey === 'matter_status' && v.systemKey === 'cmi_incomplete',
+    )?.id;
+    expect(cmiStatusId).toBeTruthy();
+
+    const filteredFinanceList = await runAsActionActor(
+      'P-000009',
+      () =>
+        loadMattersListPageData('P-000009', {
+          statusFilter: cmiStatusId,
+          page: 1,
+          pageSize: 200,
+        }),
+      { roles: ['finance'], mfaVerified: false },
+    );
+
+    const m2Filtered = filteredFinanceList.matters.find((m) => m.id === 'M-000002');
+    expect(m2Filtered).toBeDefined();
+    expect(m2Filtered!.isLegacyCmiIncomplete).toBe(true);
+    expect(m2Filtered!.amlStatus).toBe(REDACTED_MATTER_CDD_STATUS);
+    expect(m2Filtered!.amlCompletedAt).toBeNull();
+    expect(isMatterCmiIncompleteStatus(m2Filtered!, filteredFinanceList.shell.values)).toBe(true);
+    expect(resolveMatterStatusPill(m2Filtered!, filteredFinanceList.shell.values)).toMatchObject({
+      label: 'CMI incomplete',
+      tone: 'warning',
+      isCmiIncomplete: true,
+    });
+
+    // Gate-opened Active verified matter shows 'Open' and is excluded from CMI incomplete filter
+    expect(filteredFinanceList.matters.some((m) => m.id === fx.verifiedMatterId)).toBe(false);
+    const gateOpenedFinance = financeList.matters.find((m) => m.id === fx.verifiedMatterId);
+    expect(gateOpenedFinance).toBeDefined();
+    expect(gateOpenedFinance!.isLegacyCmiIncomplete).toBe(false);
+    expect(resolveMatterStatusPill(gateOpenedFinance!, financeList.shell.values)).toMatchObject({
+      label: 'Open',
+      tone: 'positive',
+      isCmiIncomplete: false,
+    });
+
+    // Detail, Home, Person & Organisation loaders all pass activeStatusIds
+    const m2DetailFinance = await runAsActionActor(
+      'P-000009',
+      () => loadMatterDetailPageData('P-000009', 'M-000002'),
+      { roles: ['finance'], mfaVerified: false },
+    );
+    expect(m2DetailFinance?.kind).toBe('profile');
+    if (m2DetailFinance?.kind === 'profile') {
+      expect(m2DetailFinance.matter.isLegacyCmiIncomplete).toBe(true);
+      expect(m2DetailFinance.matter.amlStatus).toBe(REDACTED_MATTER_CDD_STATUS);
+      expect(
+        resolveMatterStatusPill(m2DetailFinance.matter, m2DetailFinance.shell.values),
+      ).toMatchObject({
+        label: 'CMI incomplete',
+        tone: 'warning',
+        isCmiIncomplete: true,
+      });
+    }
+
+    const homeFinance = await runAsActionActor(
+      'P-000009',
+      () => loadHomePageData('P-000009'),
+      { roles: ['finance'], mfaVerified: false },
+    );
+    const m2Home = homeFinance.matters.find((m) => m.id === 'M-000002');
+    expect(m2Home?.isLegacyCmiIncomplete).toBe(true);
+    expect(m2Home?.amlStatus).toBe(REDACTED_MATTER_CDD_STATUS);
+
+    const personDetailFinance = await runAsActionActor(
+      'P-000009',
+      () => loadPersonDetailPageData('P-000009', 'P-000002'),
+      { roles: ['finance'], mfaVerified: false },
+    );
+    expect(personDetailFinance && 'matters' in personDetailFinance).toBe(true);
+    if (personDetailFinance && 'matters' in personDetailFinance) {
+      const m2Person = personDetailFinance.matters.find((m) => m.id === 'M-000002');
+      expect(m2Person?.isLegacyCmiIncomplete).toBe(true);
+      expect(m2Person?.amlStatus).toBe(REDACTED_MATTER_CDD_STATUS);
+    }
+  }, 30_000);
+
+  it('R819: contains zero matter_status.* literals in core/src (outside migrations) or src/domain/matterStatusDisplay.ts', () => {
+    const repoRoot = path.resolve(__dirname, '../..');
+    const filesToCheck: string[] = [
+      path.join(repoRoot, 'src', 'domain', 'matterStatusDisplay.ts'),
+    ];
+    const walkCoreSrc = (dir: string): void => {
+      for (const entry of fs.readdirSync(dir, { withFileTypes: true })) {
+        const full = path.join(dir, entry.name);
+        if (entry.isDirectory()) {
+          if (full.endsWith(path.join('tenancy', 'migrations'))) continue;
+          walkCoreSrc(full);
+        } else if (entry.isFile() && full.endsWith('.ts')) {
+          filesToCheck.push(full);
+        }
+      }
+    };
+    walkCoreSrc(path.join(repoRoot, 'core', 'src'));
+
+    const offending: string[] = [];
+    const pattern = /['"`]matter_status\.[a-z_]+['"`]/;
+    for (const filePath of filesToCheck) {
+      const content = fs.readFileSync(filePath, 'utf8');
+      if (pattern.test(content)) {
+        offending.push(path.relative(repoRoot, filePath));
+      }
+    }
+    expect(offending).toEqual([]);
+  });
 });

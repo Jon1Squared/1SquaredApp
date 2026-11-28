@@ -13,6 +13,7 @@ import {
   drainEmailOutboxForTenant,
   drainOutboxForTenant,
   GraphAppTokenProvider,
+  isCoreApiRangeCompatible,
   loadAndValidateTenantConfig,
   LocalTenantStorageProvider,
   ManualESignatureProvider,
@@ -145,8 +146,8 @@ afterEach(() => {
 });
 
 describe('S1-03: Intake check interfaces, manual adapters, evidence storage & outbox-held attachments (ADR 0038, S1-D1, S1-D11)', () => {
-  it('exposes CORE_API_VERSION 2.2.0, evidence storage category, and deep-merged integrations.intakeChecks config with fail-closed validation', async () => {
-    expect(CORE_API_VERSION).toBe('2.2.0');
+  it('exposes CORE_API_VERSION >=2.2.0 (^2.2.0), evidence storage category, and deep-merged integrations.intakeChecks config with fail-closed validation', async () => {
+    expect(isCoreApiRangeCompatible(CORE_API_VERSION, '^2.2.0')).toBe(true);
     expect(Number(CORE_REQUIRED_SCHEMA_VERSION)).toBeGreaterThanOrEqual(23);
 
     // R690: all four exported outcome tuple arrays must be deeply frozen at runtime

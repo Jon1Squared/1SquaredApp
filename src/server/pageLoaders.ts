@@ -387,6 +387,10 @@ function collectChoiceIdsBySystemKey(
     .map((v) => v.id);
 }
 
+function resolveActiveMatterStatusIds(values: readonly ChoiceValue[]): string[] {
+  return collectChoiceIdsBySystemKey(values, 'matter_status', ['active']);
+}
+
 function orderedRelationshipStatusIds(values: readonly ChoiceValue[]): string[] {
   return values
     .filter((v) => v.listKey === 'relationship_status')
@@ -871,7 +875,12 @@ async function loadShellContextUncached(
       ? matterRepo.listVisibleMattersForEntity<Matter>(
           ctx,
           { ownerPersonId: effectiveWorkPerson.id, includeMerged: false },
-          { viewerId: rawUser.id, hasRestrictedMatterAccess, canViewCdd },
+          {
+            viewerId: rawUser.id,
+            hasRestrictedMatterAccess,
+            canViewCdd,
+            activeStatusIds: resolveActiveMatterStatusIds(store.values),
+          },
         )
       : Promise.resolve<Matter[]>([]),
     finance.canViewMatter
@@ -1091,6 +1100,7 @@ export async function loadHomePageData(
       viewerId: currentUserId,
       hasRestrictedMatterAccess,
       canViewCdd,
+      activeStatusIds: resolveActiveMatterStatusIds(shell.values),
     }),
     intakeRepo.listVisibleEnquiries<Enquiry>(ctx, currentUserId, {
       hasRestrictedMatterAccess,
@@ -1480,7 +1490,12 @@ export async function loadPersonDetailPageData(
         contactIds: [person.id],
         ownerPersonId: isEmployeeOrLeaver ? person.id : undefined,
       },
-      { viewerId: currentUserId, hasRestrictedMatterAccess, canViewCdd },
+      {
+        viewerId: currentUserId,
+        hasRestrictedMatterAccess,
+        canViewCdd,
+        activeStatusIds: resolveActiveMatterStatusIds(shell.values),
+      },
     ),
     taskRepo.listVisibleTasks<Task>(ctx, currentUserId, {
       linkedRecordType: 'person',
@@ -1527,7 +1542,12 @@ export async function loadPersonDetailPageData(
     ? await matterRepo.listVisibleMattersForEntity<Matter>(
         ctx,
         { clientIds: [mainLink.organisationId], includeMerged: false },
-        { viewerId: currentUserId, hasRestrictedMatterAccess, canViewCdd },
+        {
+          viewerId: currentUserId,
+          hasRestrictedMatterAccess,
+          canViewCdd,
+          activeStatusIds: resolveActiveMatterStatusIds(shell.values),
+        },
       )
     : [];
   const matters = dedupeById([...directMatters, ...mainOrgMatters]);
@@ -1729,6 +1749,7 @@ export async function loadPersonFormPageData(
           viewerId: currentUserId,
           hasRestrictedMatterAccess,
           canViewCdd: shell.canViewCdd,
+          activeStatusIds: resolveActiveMatterStatusIds(shell.values),
         },
       ),
       canViewEmploymentAndHandover
@@ -2061,7 +2082,12 @@ export async function loadOrganisationDetailPageData(
         partyEntityIds: [organisation.id],
         contactIds: [organisation.id],
       },
-      { viewerId: currentUserId, hasRestrictedMatterAccess, canViewCdd },
+      {
+        viewerId: currentUserId,
+        hasRestrictedMatterAccess,
+        canViewCdd,
+        activeStatusIds: resolveActiveMatterStatusIds(shell.values),
+      },
     ),
     taskRepo.listVisibleTasks<Task>(ctx, currentUserId, {
       linkedRecordType: 'organisation',
@@ -2474,10 +2500,12 @@ export async function loadMatterDetailPageData(
   const intakeRepo = getIntakeQuoteRepository();
   const taskRepo = getTaskWorkflowRepository();
 
+  const activeStatusIds = resolveActiveMatterStatusIds(shell.values);
   const matter = await matterRepo.getMatterById<Matter>(ctx, id, {
     viewerId: currentUserId,
     hasRestrictedMatterAccess,
     canViewCdd: shell.canViewCdd,
+    activeStatusIds,
   });
   if (!matter) return null;
 
@@ -2572,6 +2600,7 @@ export async function loadMatterDetailPageData(
               viewerId: currentUserId,
               hasRestrictedMatterAccess,
               canViewCdd: shell.canViewCdd,
+              activeStatusIds,
             },
           )
         : Promise.resolve<Matter[]>([]),
@@ -2882,6 +2911,7 @@ export async function loadMatterFormPageData(
           viewerId: currentUserId,
           hasRestrictedMatterAccess,
           canViewCdd: shell.canViewCdd,
+          activeStatusIds: resolveActiveMatterStatusIds(shell.values),
         })
       : Promise.resolve<Matter | null>(null),
     params.quoteId && shell.canViewQuotes
@@ -3311,6 +3341,7 @@ export async function loadEnquiriesListPageData(
           viewerId: currentUserId,
           hasRestrictedMatterAccess,
           canViewCdd: shell.canViewCdd,
+          activeStatusIds: resolveActiveMatterStatusIds(shell.values),
         })
       : Promise.resolve<Matter[]>([]),
   ]);
@@ -3423,6 +3454,7 @@ export async function loadEnquiryDetailPageData(
           viewerId: currentUserId,
           hasRestrictedMatterAccess,
           canViewCdd: shell.canViewCdd,
+          activeStatusIds: resolveActiveMatterStatusIds(shell.values),
         })
       : Promise.resolve<Matter | null>(null),
     keyDateRepo.listKeyDatesForEnquiry(ctx, enquiry.id, currentUserId),
@@ -3551,6 +3583,7 @@ export async function loadQuoteDetailPageData(
           viewerId: currentUserId,
           hasRestrictedMatterAccess,
           canViewCdd: shell.canViewCdd,
+          activeStatusIds: resolveActiveMatterStatusIds(shell.values),
         })
       : Promise.resolve<Matter | null>(null),
     rateClientId || quote.practiceAreaId
@@ -3690,6 +3723,7 @@ async function hydrateLinkedRecordsForTasks(
   canViewCdd: boolean,
   tasks: readonly Task[],
   extraLinkedRecord?: { recordType: string; recordId: string } | null,
+  activeStatusIds?: readonly string[],
 ): Promise<{
   matters: Matter[];
   enquiries: Enquiry[];
@@ -3729,6 +3763,7 @@ async function hydrateLinkedRecordsForTasks(
           viewerId,
           hasRestrictedMatterAccess,
           canViewCdd,
+          activeStatusIds,
         })
       : Promise.resolve<Matter[]>([]),
     enquiryIds.size > 0
@@ -3887,6 +3922,8 @@ export async function loadTasksListPageData(
       shell.canViewQuotes,
       shell.canViewCdd,
       tasks,
+      undefined,
+      resolveActiveMatterStatusIds(shell.values),
     );
   const { people, organisations } = await collectReferencedParties({
     ctx: shell.ctx,
@@ -3960,6 +3997,8 @@ export async function loadTaskDetailPageData(
       shell.canViewQuotes,
       shell.canViewCdd,
       [task],
+      undefined,
+      resolveActiveMatterStatusIds(shell.values),
     ),
   ]);
   const { people, organisations } = await collectReferencedParties({
@@ -4026,6 +4065,7 @@ export async function loadTaskFormPageData(
     shell.canViewCdd,
     [],
     initialLinkedRecord,
+    resolveActiveMatterStatusIds(shell.values),
   );
   const { people, organisations } = await collectReferencedParties({
     ctx: shell.ctx,
@@ -4106,6 +4146,7 @@ export async function loadKeyDatesPageData(
           viewerId: shell.currentUserId,
           hasRestrictedMatterAccess: shell.hasRestrictedMatterAccess,
           canViewCdd: shell.canViewCdd,
+          activeStatusIds: resolveActiveMatterStatusIds(shell.values),
         })
       : Promise.resolve<Matter[]>([]),
     enquiryIds.length > 0

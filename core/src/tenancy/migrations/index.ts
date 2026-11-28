@@ -35,10 +35,14 @@ export interface TenantMigrationDefinition {
   readonly tablesChanged: readonly string[];
   readonly dependsOn?: readonly string[];
   /**
-   * Optional TypeScript backfill hook run inside the migration transaction immediately after
-   * `upSql` (for canonical candidate-key computation shared with repository writes).
+   * Optional TypeScript backfill or verification hook run inside the migration transaction
+   * immediately after `upSql`. May return zero-PII verification metadata to attach onto the
+   * committed `AppliedTenantMigrationRecord`.
    */
-  readonly afterUpSql?: (client: PgTypes.Client, ctx: TenantContext) => Promise<void>;
+  readonly afterUpSql?: (
+    client: PgTypes.Client,
+    ctx: TenantContext,
+  ) => Promise<void | Record<string, unknown>>;
   /**
    * Deterministic signature hashed into `computeMigrationChecksum` when `afterUpSql` is used,
    * leaving checksums for pure-SQL migrations untouched when `undefined`.
@@ -58,6 +62,7 @@ export interface AppliedTenantMigrationRecord {
   name: string;
   checksum: string;
   appliedAt: string;
+  readonly verificationMetadata?: Readonly<Record<string, unknown>>;
 }
 
 export const DOCUMENT_GENERATION_MIGRATION_0001: TenantMigrationDefinition = {
@@ -3552,6 +3557,497 @@ DROP SEQUENCE IF EXISTS public.tenant_opening_override_id_seq;
 `.trim(),
   };
 
+export interface PmsPenceColumnSpec {
+  readonly table: string;
+  readonly sourceColumn: string;
+  readonly penceColumn: string;
+  readonly nullable: boolean;
+}
+
+export const PMS_PENCE_MIGRATION_0027_COLUMNS: readonly PmsPenceColumnSpec[] =
+  Object.freeze([
+    {
+      table: 'pms_fee_earners',
+      sourceColumn: 'charge_out_rate',
+      penceColumn: 'charge_out_rate_pence',
+      nullable: false,
+    },
+    {
+      table: 'pms_matters',
+      sourceColumn: 'fee_estimate',
+      penceColumn: 'fee_estimate_pence',
+      nullable: false,
+    },
+    {
+      table: 'pms_matter_financials',
+      sourceColumn: 'current_fee_estimate',
+      penceColumn: 'current_fee_estimate_pence',
+      nullable: false,
+    },
+    {
+      table: 'pms_matter_financials',
+      sourceColumn: 'wip_value',
+      penceColumn: 'wip_value_pence',
+      nullable: false,
+    },
+    {
+      table: 'pms_matter_financials',
+      sourceColumn: 'total_time_value',
+      penceColumn: 'total_time_value_pence',
+      nullable: false,
+    },
+    {
+      table: 'pms_matter_financials',
+      sourceColumn: 'billed_fees_ex_vat',
+      penceColumn: 'billed_fees_ex_vat_pence',
+      nullable: false,
+    },
+    {
+      table: 'pms_matter_financials',
+      sourceColumn: 'billed_disb_ex_vat',
+      penceColumn: 'billed_disb_ex_vat_pence',
+      nullable: false,
+    },
+    {
+      table: 'pms_matter_financials',
+      sourceColumn: 'billed_vat',
+      penceColumn: 'billed_vat_pence',
+      nullable: false,
+    },
+    {
+      table: 'pms_matter_financials',
+      sourceColumn: 'billed_total_inc_vat',
+      penceColumn: 'billed_total_inc_vat_pence',
+      nullable: false,
+    },
+    {
+      table: 'pms_matter_financials',
+      sourceColumn: 'cash_received',
+      penceColumn: 'cash_received_pence',
+      nullable: false,
+    },
+    {
+      table: 'pms_matter_financials',
+      sourceColumn: 'outstanding_debt',
+      penceColumn: 'outstanding_debt_pence',
+      nullable: false,
+    },
+    {
+      table: 'pms_matter_financials',
+      sourceColumn: 'unbilled_disbursements',
+      penceColumn: 'unbilled_disbursements_pence',
+      nullable: false,
+    },
+    {
+      table: 'pms_matter_financials',
+      sourceColumn: 'client_account_balance',
+      penceColumn: 'client_account_balance_pence',
+      nullable: false,
+    },
+    {
+      table: 'pms_fee_estimates',
+      sourceColumn: 'estimated_fees_ex_vat',
+      penceColumn: 'estimated_fees_ex_vat_pence',
+      nullable: false,
+    },
+    {
+      table: 'pms_invoices',
+      sourceColumn: 'total_inc_vat',
+      penceColumn: 'total_inc_vat_pence',
+      nullable: false,
+    },
+    {
+      table: 'pms_payments',
+      sourceColumn: 'amount',
+      penceColumn: 'amount_pence',
+      nullable: false,
+    },
+    {
+      table: 'pms_time_entries',
+      sourceColumn: 'value',
+      penceColumn: 'value_pence',
+      nullable: false,
+    },
+    {
+      table: 'pms_disbursements',
+      sourceColumn: 'amount_ex_vat',
+      penceColumn: 'amount_ex_vat_pence',
+      nullable: false,
+    },
+    {
+      table: 'pms_client_account_entries',
+      sourceColumn: 'amount',
+      penceColumn: 'amount_pence',
+      nullable: false,
+    },
+    {
+      table: 'pms_client_account_entries',
+      sourceColumn: 'balance_after',
+      penceColumn: 'balance_after_pence',
+      nullable: false,
+    },
+  ]);
+
+export interface PmsPenceColumnVerificationEntry {
+  readonly table: string;
+  readonly column: string;
+  readonly sourceColumn: string;
+  readonly rowCount: number;
+  readonly nonNullCount: number;
+  readonly totalDiffPence: number;
+}
+
+export interface PmsPenceConversionVerificationReport {
+  readonly tenantId: string;
+  readonly databaseName: string;
+  readonly tablesVerified: number;
+  readonly totalColumnsVerified: number;
+  readonly totalRowsChecked: number;
+  readonly totalNonNullChecked: number;
+  readonly mismatchCount: number;
+  readonly maxColumnTotalDiffPence: number;
+  readonly columns: readonly PmsPenceColumnVerificationEntry[];
+}
+
+const MATTER_RETAINER_GBP_TEXT_EXPR =
+  "COALESCE(NULLIF(btrim(costs_json->>'retainerMoniesOnAccountGbp'), ''), NULLIF(btrim(opening_record_json->>'retainerMoniesOnAccountGbp'), ''))";
+
+export async function verifyPmsMoneyPenceConversionInClient(
+  client: PgTypes.Client,
+  ctx: TenantContext,
+): Promise<PmsPenceConversionVerificationReport> {
+  const columns: PmsPenceColumnVerificationEntry[] = [];
+  const tableRowCountByTable = new Map<string, number>();
+  let totalRowsChecked = 0;
+  let totalNonNullChecked = 0;
+  let maxColumnTotalDiffPence = 0;
+  let mismatchCount = 0;
+  const mismatchDetails: string[] = [];
+
+  const verifyColumn = async (spec: {
+    readonly table: string;
+    readonly sourceLabel: string;
+    readonly sourceExpr: string;
+    readonly penceColumn: string;
+  }): Promise<void> => {
+    const tableIdent = quotePgIdentifier(spec.table);
+    const penceIdent = quotePgIdentifier(spec.penceColumn);
+
+    // Check 1: row-level round-trip within < 0.005 (and exact 0.005 half-penny away-from-zero direction)
+    const roundTripRes = await client.query<{ bad_count: string }>(
+      `SELECT COUNT(*)::bigint::text AS bad_count
+         FROM public.${tableIdent}
+        WHERE tenant_id = $1
+          AND (
+            ((${penceIdent}) IS NULL) IS DISTINCT FROM ((${spec.sourceExpr}) IS NULL)
+            OR (
+              ${penceIdent} IS NOT NULL
+              AND (${spec.sourceExpr}) IS NOT NULL
+              AND (
+                ABS((${penceIdent}::numeric / 100.0) - (${spec.sourceExpr})::numeric) > 0.005
+                OR (
+                  ABS((${penceIdent}::numeric / 100.0) - (${spec.sourceExpr})::numeric) = 0.005
+                  AND ABS(${penceIdent}::numeric) <= ABS((${spec.sourceExpr})::numeric) * 100
+                )
+              )
+            )
+          )`,
+      [ctx.tenantId],
+    );
+    const badRoundTrip = Number(roundTripRes.rows[0]?.bad_count ?? '0');
+
+    // Check 2 & 3: per-column totals within 1p per non-null row + row/non-null count parity
+    const statsRes = await client.query<{
+      row_count: string;
+      src_non_null: string;
+      pence_non_null: string;
+      total_diff_pence: string;
+    }>(
+      `SELECT
+         COUNT(*)::bigint::text AS row_count,
+         COUNT(${spec.sourceExpr})::bigint::text AS src_non_null,
+         COUNT(${penceIdent})::bigint::text AS pence_non_null,
+         (
+           COALESCE(SUM(${penceIdent}::numeric), 0)
+           - COALESCE(ROUND(SUM((${spec.sourceExpr})::numeric) * 100), 0)
+         )::bigint::text AS total_diff_pence
+       FROM public.${tableIdent}
+       WHERE tenant_id = $1`,
+      [ctx.tenantId],
+    );
+    const rowCount = Number(statsRes.rows[0]?.row_count ?? '0');
+    const srcNonNull = Number(statsRes.rows[0]?.src_non_null ?? '0');
+    const penceNonNull = Number(statsRes.rows[0]?.pence_non_null ?? '0');
+    const totalDiffPence = Number(statsRes.rows[0]?.total_diff_pence ?? '0');
+    const absDiff = Math.abs(totalDiffPence);
+
+    const prevTableRows = tableRowCountByTable.get(spec.table);
+    let tableRowParityError = false;
+    if (prevTableRows === undefined) {
+      tableRowCountByTable.set(spec.table, rowCount);
+      totalRowsChecked += rowCount;
+    } else if (prevTableRows !== rowCount) {
+      tableRowParityError = true;
+    }
+
+    const totalOutOfTolerance = absDiff > srcNonNull;
+    const countMismatch = srcNonNull !== penceNonNull || tableRowParityError;
+
+    if (badRoundTrip > 0 || totalOutOfTolerance || countMismatch) {
+      mismatchCount += badRoundTrip + (totalOutOfTolerance ? 1 : 0) + (countMismatch ? 1 : 0);
+      mismatchDetails.push(
+        `${spec.table}.${spec.penceColumn} (badRoundTrip=${badRoundTrip}, srcNonNull=${srcNonNull}, penceNonNull=${penceNonNull}, totalDiffPence=${totalDiffPence})`,
+      );
+    }
+
+    totalNonNullChecked += srcNonNull;
+    if (absDiff > maxColumnTotalDiffPence) {
+      maxColumnTotalDiffPence = absDiff;
+    }
+
+    columns.push(
+      Object.freeze({
+        table: spec.table,
+        column: spec.penceColumn,
+        sourceColumn: spec.sourceLabel,
+        rowCount,
+        nonNullCount: srcNonNull,
+        totalDiffPence,
+      }),
+    );
+  };
+
+  for (const col of PMS_PENCE_MIGRATION_0027_COLUMNS) {
+    await verifyColumn({
+      table: col.table,
+      sourceLabel: col.sourceColumn,
+      sourceExpr: quotePgIdentifier(col.sourceColumn),
+      penceColumn: col.penceColumn,
+    });
+  }
+
+  await verifyColumn({
+    table: 'matters',
+    sourceLabel: 'retainerMoniesOnAccountGbp',
+    sourceExpr: `CASE WHEN ${MATTER_RETAINER_GBP_TEXT_EXPR} IS NULL THEN NULL ELSE (${MATTER_RETAINER_GBP_TEXT_EXPR})::numeric END`,
+    penceColumn: 'retainer_monies_on_account_pence',
+  });
+
+  if (mismatchCount > 0) {
+    const err = new Error(
+      `PMS_PENCE_CONVERSION_MISMATCH: Failed post-conversion verification across ${mismatchDetails.join('; ')}.`,
+    ) as Error & { code: string };
+    err.code = 'PMS_PENCE_CONVERSION_MISMATCH';
+    throw err;
+  }
+
+  return Object.freeze({
+    tenantId: ctx.tenantId,
+    databaseName: ctx.postgresDatabaseName,
+    tablesVerified: tableRowCountByTable.size,
+    totalColumnsVerified: columns.length,
+    totalRowsChecked,
+    totalNonNullChecked,
+    mismatchCount: 0,
+    maxColumnTotalDiffPence,
+    columns: Object.freeze(columns),
+  });
+}
+
+const PMS_PRECHECK_COLUMNS_SQL = PMS_PENCE_MIGRATION_0027_COLUMNS.map(
+  (c) => `('${c.table}', '${c.sourceColumn}')`,
+).join(',\n      ');
+
+export const PMS_MONEY_AND_RETAINER_PENCE_MIGRATION_0027: TenantMigrationDefinition =
+  {
+    version: '0027',
+    name: '0027_pms_money_and_retainer_pence_expand',
+    description:
+      'Expand the 20 monetary PMS columns across 9 pms_* tables (retaining wip_hours and hours as DOUBLE PRECISION) and public.matters.retainer_monies_on_account_pence to signed BIGINT integer pence, backfill via ROUND(col::numeric * 100)::bigint, and run fail-closed R820 conversion verification in afterUpSql (ADR 0041).',
+    tablesChanged: [
+      'pms_fee_earners',
+      'pms_matters',
+      'pms_matter_financials',
+      'pms_fee_estimates',
+      'pms_invoices',
+      'pms_payments',
+      'pms_time_entries',
+      'pms_disbursements',
+      'pms_client_account_entries',
+      'matters',
+    ],
+    dependsOn: ['0009', '0013'],
+    backfillSignature: 'pms-money-and-retainer-pence-0027-r820-v1',
+    upSql: `
+ALTER TABLE public.pms_fee_earners
+  ADD COLUMN IF NOT EXISTS charge_out_rate_pence BIGINT NOT NULL DEFAULT 0;
+
+ALTER TABLE public.pms_matters
+  ADD COLUMN IF NOT EXISTS fee_estimate_pence BIGINT NOT NULL DEFAULT 0;
+
+ALTER TABLE public.pms_matter_financials
+  ADD COLUMN IF NOT EXISTS current_fee_estimate_pence BIGINT NOT NULL DEFAULT 0,
+  ADD COLUMN IF NOT EXISTS wip_value_pence BIGINT NOT NULL DEFAULT 0,
+  ADD COLUMN IF NOT EXISTS total_time_value_pence BIGINT NOT NULL DEFAULT 0,
+  ADD COLUMN IF NOT EXISTS billed_fees_ex_vat_pence BIGINT NOT NULL DEFAULT 0,
+  ADD COLUMN IF NOT EXISTS billed_disb_ex_vat_pence BIGINT NOT NULL DEFAULT 0,
+  ADD COLUMN IF NOT EXISTS billed_vat_pence BIGINT NOT NULL DEFAULT 0,
+  ADD COLUMN IF NOT EXISTS billed_total_inc_vat_pence BIGINT NOT NULL DEFAULT 0,
+  ADD COLUMN IF NOT EXISTS cash_received_pence BIGINT NOT NULL DEFAULT 0,
+  ADD COLUMN IF NOT EXISTS outstanding_debt_pence BIGINT NOT NULL DEFAULT 0,
+  ADD COLUMN IF NOT EXISTS unbilled_disbursements_pence BIGINT NOT NULL DEFAULT 0,
+  ADD COLUMN IF NOT EXISTS client_account_balance_pence BIGINT NOT NULL DEFAULT 0;
+
+ALTER TABLE public.pms_fee_estimates
+  ADD COLUMN IF NOT EXISTS estimated_fees_ex_vat_pence BIGINT NOT NULL DEFAULT 0;
+
+ALTER TABLE public.pms_invoices
+  ADD COLUMN IF NOT EXISTS total_inc_vat_pence BIGINT NOT NULL DEFAULT 0;
+
+ALTER TABLE public.pms_payments
+  ADD COLUMN IF NOT EXISTS amount_pence BIGINT NOT NULL DEFAULT 0;
+
+ALTER TABLE public.pms_time_entries
+  ADD COLUMN IF NOT EXISTS value_pence BIGINT NOT NULL DEFAULT 0;
+
+ALTER TABLE public.pms_disbursements
+  ADD COLUMN IF NOT EXISTS amount_ex_vat_pence BIGINT NOT NULL DEFAULT 0;
+
+ALTER TABLE public.pms_client_account_entries
+  ADD COLUMN IF NOT EXISTS amount_pence BIGINT NOT NULL DEFAULT 0,
+  ADD COLUMN IF NOT EXISTS balance_after_pence BIGINT NOT NULL DEFAULT 0;
+
+ALTER TABLE public.matters
+  ADD COLUMN IF NOT EXISTS retainer_monies_on_account_pence BIGINT NULL
+  CHECK (retainer_monies_on_account_pence IS NULL OR retainer_monies_on_account_pence >= 0);
+
+DO $$
+DECLARE
+  rec RECORD;
+  bad_count BIGINT;
+BEGIN
+  FOR rec IN
+    SELECT * FROM (VALUES
+      ${PMS_PRECHECK_COLUMNS_SQL}
+    ) AS cols(tbl, col)
+  LOOP
+    EXECUTE format(
+      'SELECT COUNT(*)::bigint FROM public.%I WHERE %I IS NOT NULL AND (%I IN (''NaN''::double precision, ''Infinity''::double precision, ''-Infinity''::double precision) OR ABS(%I) > 90071992547409.91::double precision)',
+      rec.tbl, rec.col, rec.col, rec.col
+    ) INTO bad_count;
+    IF bad_count > 0 THEN
+      RAISE EXCEPTION 'PMS_PENCE_CONVERSION_MISMATCH: non-finite or out-of-range float detected in %.% (count=%)', rec.tbl, rec.col, bad_count;
+    END IF;
+  END LOOP;
+
+  SELECT COUNT(*)::bigint INTO bad_count
+    FROM public.matters
+   WHERE ${MATTER_RETAINER_GBP_TEXT_EXPR} IS NOT NULL
+     AND (
+       ${MATTER_RETAINER_GBP_TEXT_EXPR} !~ '^\\s*[-+]?[0-9]+(\\.[0-9]+)?\\s*$'
+       OR (${MATTER_RETAINER_GBP_TEXT_EXPR})::numeric < 0
+       OR (${MATTER_RETAINER_GBP_TEXT_EXPR})::numeric > 90071992547409.91
+     );
+  IF bad_count > 0 THEN
+    RAISE EXCEPTION 'PMS_PENCE_CONVERSION_MISMATCH: invalid or out-of-range retainerMoniesOnAccountGbp detected in matters (count=%)', bad_count;
+  END IF;
+END $$;
+
+UPDATE public.pms_fee_earners
+   SET charge_out_rate_pence = ROUND((charge_out_rate::numeric) * 100)::bigint;
+
+UPDATE public.pms_matters
+   SET fee_estimate_pence = ROUND((fee_estimate::numeric) * 100)::bigint;
+
+UPDATE public.pms_matter_financials
+   SET current_fee_estimate_pence = ROUND((current_fee_estimate::numeric) * 100)::bigint,
+       wip_value_pence = ROUND((wip_value::numeric) * 100)::bigint,
+       total_time_value_pence = ROUND((total_time_value::numeric) * 100)::bigint,
+       billed_fees_ex_vat_pence = ROUND((billed_fees_ex_vat::numeric) * 100)::bigint,
+       billed_disb_ex_vat_pence = ROUND((billed_disb_ex_vat::numeric) * 100)::bigint,
+       billed_vat_pence = ROUND((billed_vat::numeric) * 100)::bigint,
+       billed_total_inc_vat_pence = ROUND((billed_total_inc_vat::numeric) * 100)::bigint,
+       cash_received_pence = ROUND((cash_received::numeric) * 100)::bigint,
+       outstanding_debt_pence = ROUND((outstanding_debt::numeric) * 100)::bigint,
+       unbilled_disbursements_pence = ROUND((unbilled_disbursements::numeric) * 100)::bigint,
+       client_account_balance_pence = ROUND((client_account_balance::numeric) * 100)::bigint;
+
+UPDATE public.pms_fee_estimates
+   SET estimated_fees_ex_vat_pence = ROUND((estimated_fees_ex_vat::numeric) * 100)::bigint;
+
+UPDATE public.pms_invoices
+   SET total_inc_vat_pence = ROUND((total_inc_vat::numeric) * 100)::bigint;
+
+UPDATE public.pms_payments
+   SET amount_pence = ROUND((amount::numeric) * 100)::bigint;
+
+UPDATE public.pms_time_entries
+   SET value_pence = ROUND((value::numeric) * 100)::bigint;
+
+UPDATE public.pms_disbursements
+   SET amount_ex_vat_pence = ROUND((amount_ex_vat::numeric) * 100)::bigint;
+
+UPDATE public.pms_client_account_entries
+   SET amount_pence = ROUND((amount::numeric) * 100)::bigint,
+       balance_after_pence = ROUND((balance_after::numeric) * 100)::bigint;
+
+UPDATE public.matters
+   SET retainer_monies_on_account_pence = CASE
+     WHEN ${MATTER_RETAINER_GBP_TEXT_EXPR} IS NULL THEN NULL
+     ELSE ROUND(((${MATTER_RETAINER_GBP_TEXT_EXPR})::numeric) * 100)::bigint
+   END;
+`.trim(),
+    afterUpSql: async (client, ctx) => {
+      const pmsPenceVerification = await verifyPmsMoneyPenceConversionInClient(
+        client,
+        ctx,
+      );
+      return { pmsPenceVerification };
+    },
+    downSql: `
+ALTER TABLE public.matters
+  DROP COLUMN IF EXISTS retainer_monies_on_account_pence;
+
+ALTER TABLE public.pms_client_account_entries
+  DROP COLUMN IF EXISTS balance_after_pence,
+  DROP COLUMN IF EXISTS amount_pence;
+
+ALTER TABLE public.pms_disbursements
+  DROP COLUMN IF EXISTS amount_ex_vat_pence;
+
+ALTER TABLE public.pms_time_entries
+  DROP COLUMN IF EXISTS value_pence;
+
+ALTER TABLE public.pms_payments
+  DROP COLUMN IF EXISTS amount_pence;
+
+ALTER TABLE public.pms_invoices
+  DROP COLUMN IF EXISTS total_inc_vat_pence;
+
+ALTER TABLE public.pms_fee_estimates
+  DROP COLUMN IF EXISTS estimated_fees_ex_vat_pence;
+
+ALTER TABLE public.pms_matter_financials
+  DROP COLUMN IF EXISTS client_account_balance_pence,
+  DROP COLUMN IF EXISTS unbilled_disbursements_pence,
+  DROP COLUMN IF EXISTS outstanding_debt_pence,
+  DROP COLUMN IF EXISTS cash_received_pence,
+  DROP COLUMN IF EXISTS billed_total_inc_vat_pence,
+  DROP COLUMN IF EXISTS billed_vat_pence,
+  DROP COLUMN IF EXISTS billed_disb_ex_vat_pence,
+  DROP COLUMN IF EXISTS billed_fees_ex_vat_pence,
+  DROP COLUMN IF EXISTS total_time_value_pence,
+  DROP COLUMN IF EXISTS wip_value_pence,
+  DROP COLUMN IF EXISTS current_fee_estimate_pence;
+
+ALTER TABLE public.pms_matters
+  DROP COLUMN IF EXISTS fee_estimate_pence;
+
+ALTER TABLE public.pms_fee_earners
+  DROP COLUMN IF EXISTS charge_out_rate_pence;
+`.trim(),
+  };
+
 export const CORE_TENANT_MIGRATIONS: readonly TenantMigrationDefinition[] = [
   DOCUMENT_GENERATION_MIGRATION_0001,
   DOCUMENT_STORE_INTEGRATION_MIGRATION_0002,
@@ -3579,6 +4075,7 @@ export const CORE_TENANT_MIGRATIONS: readonly TenantMigrationDefinition[] = [
   SCOPED_LOOKUP_AND_CANDIDATE_INDEXES_MIGRATION_0024,
   REGISTERS_CDD_AND_ORG_TYPE_KEYS_MIGRATION_0025,
   OPENING_GATE_OVERRIDES_AND_NUMBERING_MIGRATION_0026,
+  PMS_MONEY_AND_RETAINER_PENCE_MIGRATION_0027,
 ];
 
 export function validateMigrationCatalogueOrder(
@@ -3735,8 +4232,12 @@ export class TenantMigrationRunner {
           }
 
           await client.query(migration.upSql);
+          let verificationMetadata: Record<string, unknown> | undefined;
           if (migration.afterUpSql) {
-            await migration.afterUpSql(client, ctx);
+            const meta = await migration.afterUpSql(client, ctx);
+            if (meta && typeof meta === 'object') {
+              verificationMetadata = meta;
+            }
           }
 
           await client.query(
@@ -3808,6 +4309,7 @@ export class TenantMigrationRunner {
               name: migration.name,
               checksum,
               appliedAt,
+              ...(verificationMetadata ? { verificationMetadata } : {}),
             }),
           );
         } catch (migErr) {

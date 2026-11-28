@@ -8,6 +8,7 @@ import type {
   FeeArrangementCapEntry,
   FeeCapLevel,
   GradeRateResolution,
+  MinorUnits,
   NotificationKind as CoreNotificationKind,
   RbacConfiguration,
   ResolvedRateSource,
@@ -1009,6 +1010,7 @@ export interface Matter extends RecordBase {
   feeEstimateGbp: number | null; // CORE-045
   agreedFeeCapGbp: number | null; // CORE-046
   retainerMoniesOnAccountGbp: number | null; // CORE-047
+  retainerMoniesOnAccountPence?: MinorUnits | null;
   // CORE-055..067 Lifecycle
   stageId: string; // CORE-055
   milestoneId: string | null; // CORE-056
@@ -1027,6 +1029,8 @@ export interface Matter extends RecordBase {
   conflictDecision?: OrganisationConflictDecision | null;
   /** True when this matter was created via server-side PMS import (`createRecordFromPms`). */
   isPmsImport?: boolean;
+  /** Server-derived legacy active + CMI incomplete flag computed before CDD redaction (`R816` / `R819`). */
+  readonly isLegacyCmiIncomplete?: boolean;
   /** True when the client is a current employee of the firm; restricts browsing to authorized staff. */
   isStaffMatter?: boolean;
   /** True when an ethical wall / information barrier applies to this matter. */

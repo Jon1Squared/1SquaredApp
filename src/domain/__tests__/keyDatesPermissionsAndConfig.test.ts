@@ -4,6 +4,7 @@ import { describe, expect, it, vi } from 'vitest';
 import {
   CORE_API_VERSION,
   ExtensionHost,
+  isCoreApiRangeCompatible,
   loadAndValidateTenantConfig,
   PERMISSION_REGISTRY,
   validateKeyDatesConfig,
@@ -928,9 +929,9 @@ describe('Key Dates permissions, config schema validation, and extension contrac
     });
   });
 
-  describe('Extension API v2.2.0 Contract Tests', () => {
+  describe('Extension API ^2.2.0 Contract Tests', () => {
     it('supports keydate:read, keydate:write and all 3 KeyDateExtensionPoints with error/timeout isolation', async () => {
-      expect(CORE_API_VERSION).toBe('2.2.0');
+      expect(isCoreApiRangeCompatible(CORE_API_VERSION, '^2.2.0')).toBe(true);
       const host = new ExtensionHost({
         coreApiVersion: CORE_API_VERSION,
         defaultHookTimeoutMs: 100,

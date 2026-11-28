@@ -2,6 +2,15 @@
 
 All notable changes to `@platform/core` and `@platform/core-api` are documented in this file.
 
+## 2026-11-26 — Extension API v2.3.0 (`S1-12` Minor-Unit PostgreSQL & Formatting Helpers, ADR 0041)
+
+### Added (Backward Compatible within `^2.0.0`)
+- **`CORE_API_VERSION` bumped from `'2.2.0'` to `'2.3.0'` (`@platform/core-api`, `core/src/domain/money/index.ts`, [ADR 0041](../../docs/decisions/0041-pms-money-as-integer-pence.md)):**
+  - `pgBigIntToMinorUnits(value, label?)` — parses PostgreSQL `BIGINT` (`int8`) decimal strings, `bigint`, or safe integers into validated `MinorUnits`, normalising `-0` and rejecting fractional, malformed, or out-of-range inputs.
+  - `minorUnitsToPgBigInt(minorUnits)` — validates `MinorUnits` and serialises to canonical PostgreSQL `BIGINT` decimal strings.
+  - `subtractMinorUnits(minuend, subtrahend)` — exact `BigInt` difference within the safe integer range.
+  - `formatMinorUnitsGbp(minorUnits, options?)` — pure integer GBP currency formatter with optional `accountingBrackets` and `omitZeroPence` flags and zero floating-point conversion.
+
 ## 2026-11-22 — Extension API v2.1.0 (`S1-03` Intake Check Interfaces, Evidence Storage & Outbox Attachment References)
 
 ### Added (Backward Compatible within `^2.0.0`)

@@ -30,7 +30,7 @@ import {
   maskBankDetails,
   maskNationalInsuranceNumber,
 } from '@/domain/employment';
-import { formatGbp } from '@/domain/pms';
+import { formatGbp, resolvePmsPence } from '@/domain/pms';
 import type { ClientCddSummary } from '@/domain/cdd';
 import { mainLinkFor } from '@/domain/searchIndex';
 import { isTaskOpen } from '@/domain/tasks';
@@ -51,9 +51,10 @@ import type {
   Task,
   Team,
 } from '@/domain/types';
-import type {
-  ClientRateOverrideRecord,
-  UserNotificationPreference,
+import {
+  sumMinorUnits,
+  type ClientRateOverrideRecord,
+  type UserNotificationPreference,
 } from '@platform/core-api';
 import type { ClientPmsViewBundle } from '@/server/services';
 import { ClientFinanceSection } from './ClientFinanceSection';
@@ -634,11 +635,12 @@ export function PersonProfileClient({
     const overdueCount =
       canViewFinance &&
       pmsSummary &&
-      pmsSummary.aged_1_30 +
-        pmsSummary.aged_31_60 +
-        pmsSummary.aged_61_90 +
-        pmsSummary.aged_90_plus >
-        0
+      sumMinorUnits([
+        resolvePmsPence(pmsSummary.aged_1_30_pence, pmsSummary.aged_1_30),
+        resolvePmsPence(pmsSummary.aged_31_60_pence, pmsSummary.aged_31_60),
+        resolvePmsPence(pmsSummary.aged_61_90_pence, pmsSummary.aged_61_90),
+        resolvePmsPence(pmsSummary.aged_90_plus_pence, pmsSummary.aged_90_plus),
+      ]) > 0
         ? 1
         : 0;
 

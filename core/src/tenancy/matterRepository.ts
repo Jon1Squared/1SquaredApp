@@ -18,6 +18,13 @@
 
 import type { MatterNumberingConfig, TenantContext } from '../api/index';
 import {
+  minorUnitsToPgBigInt,
+  minorUnitsToPounds,
+  pgBigIntToMinorUnits,
+  poundsToMinorUnits,
+  type MinorUnits,
+} from '../domain/money/index';
+import {
   DEFAULT_MATTER_NUMBERING_CONFIG,
   formatMatterNumberFromSequence,
   MATTER_NUMBERING_ERROR_CODES,
@@ -225,6 +232,7 @@ export interface TenantMatterRecord {
   feeEstimateGbp: number | null;
   agreedFeeCapGbp: number | null;
   retainerMoniesOnAccountGbp: number | null;
+  retainerMoniesOnAccountPence?: MinorUnits | null;
   stageId: string;
   milestoneId: string | null;
   enquiryReceivedAt: string | null;
@@ -238,6 +246,7 @@ export interface TenantMatterRecord {
   conflictCheckRecord?: unknown;
   conflictDecision?: unknown;
   isPmsImport?: boolean;
+  isLegacyCmiIncomplete?: boolean;
   isStaffMatter?: boolean;
   hasEthicalWall?: boolean;
   restrictedAccessUserIds?: string[];
@@ -294,6 +303,7 @@ interface DbMatterRow {
   conflict_check_record_json: Record<string, unknown> | null;
   risk_assessment_json: Record<string, unknown> | null;
   costs_json: Record<string, unknown> | null;
+  retainer_monies_on_account_pence?: string | number | null;
   opening_record_json: Record<string, unknown> | null;
   milestones_json: Record<string, unknown> | null;
 }
@@ -376,9 +386,33 @@ function mapPartyRow(row: DbMatterPartyRow): TenantMatterPartyRecord {
   return out;
 }
 
+function computeIsLegacyCmiIncomplete(
+  row: DbMatterRow,
+  opening: Record<string, unknown>,
+  activeStatusIds?: readonly string[],
+): boolean {
+  if (!activeStatusIds || activeStatusIds.length === 0) {
+    return false;
+  }
+  const statusId = row.status_id ?? '';
+  if (!statusId || !activeStatusIds.includes(statusId)) {
+    return false;
+  }
+  const openedViaGate =
+    opening.isPmsImport !== true &&
+    (row.fields_json?.matterOpeningGate as { openedViaGate?: unknown } | undefined)
+      ?.openedViaGate === true;
+  if (openedViaGate) {
+    return false;
+  }
+  const rawAmlStatus = typeof opening.amlStatus === 'string' ? opening.amlStatus : '';
+  return rawAmlStatus === 'Pending' || rawAmlStatus === 'CMI incomplete';
+}
+
 function mapMatterRow<TMatter extends TenantMatterRecord = TenantMatterRecord>(
   row: DbMatterRow,
   partyRows: readonly DbMatterPartyRow[],
+  options?: { readonly activeStatusIds?: readonly string[] },
 ): TMatter {
   const opening = (row.opening_record_json ?? {}) as Record<string, unknown>;
   const costs = (row.costs_json ?? {}) as Record<string, unknown>;
@@ -390,6 +424,12 @@ function mapMatterRow<TMatter extends TenantMatterRecord = TenantMatterRecord>(
       : Array.isArray(opening.partiesFallback)
         ? structuredClone(opening.partiesFallback as TenantMatterPartyRecord[])
         : [];
+
+  const retainerPence =
+    row.retainer_monies_on_account_pence !== null &&
+    row.retainer_monies_on_account_pence !== undefined
+      ? pgBigIntToMinorUnits(row.retainer_monies_on_account_pence)
+      : null;
 
   const out: TenantMatterRecord = {
     id: row.id,
@@ -483,10 +523,9 @@ function mapMatterRow<TMatter extends TenantMatterRecord = TenantMatterRecord>(
       costs.agreedFeeCapGbp !== undefined
         ? (costs.agreedFeeCapGbp as number | null)
         : ((opening.agreedFeeCapGbp as number | null) ?? null),
+    retainerMoniesOnAccountPence: retainerPence,
     retainerMoniesOnAccountGbp:
-      costs.retainerMoniesOnAccountGbp !== undefined
-        ? (costs.retainerMoniesOnAccountGbp as number | null)
-        : ((opening.retainerMoniesOnAccountGbp as number | null) ?? null),
+      retainerPence !== null ? minorUnitsToPounds(retainerPence) : null,
     stageId: row.current_stage_id ?? ((milestones.stageId as string) ?? ''),
     milestoneId: (milestones.milestoneId as string | null) ?? null,
     enquiryReceivedAt: (milestones.enquiryReceivedAt as string | null) ?? null,
@@ -555,6 +594,11 @@ function mapMatterRow<TMatter extends TenantMatterRecord = TenantMatterRecord>(
   if (opening.isPmsImport === true) {
     out.isPmsImport = true;
   }
+  out.isLegacyCmiIncomplete = computeIsLegacyCmiIncomplete(
+    row,
+    opening,
+    options?.activeStatusIds,
+  );
   if (row.department_id !== null || opening.hasOwningDepartmentId === true) {
     out.owningDepartmentId = row.department_id;
   }
@@ -594,11 +638,43 @@ function buildMatterDbParameters(
       ? (matter.fieldValues['CORE-070'] as string)
       : null;
 
+  const rawRetainerGbp = matter.retainerMoniesOnAccountGbp;
+  const rawRetainerPence = matter.retainerMoniesOnAccountPence;
+  let retainerPence: MinorUnits | null = null;
+  if (rawRetainerGbp === null) {
+    // Explicit null always clears retainer even if spread from an object carrying retainerMoniesOnAccountPence.
+    retainerPence = null;
+  } else if (
+    rawRetainerPence !== undefined &&
+    rawRetainerPence !== null &&
+    typeof rawRetainerPence === 'number' &&
+    Number.isSafeInteger(rawRetainerPence)
+  ) {
+    if (
+      rawRetainerGbp !== undefined &&
+      Number.isFinite(Number(rawRetainerGbp)) &&
+      minorUnitsToPounds(rawRetainerPence) !== rawRetainerGbp
+    ) {
+      retainerPence = poundsToMinorUnits(rawRetainerGbp);
+    } else {
+      retainerPence = rawRetainerPence;
+    }
+  } else if (
+    rawRetainerGbp !== undefined &&
+    Number.isFinite(Number(rawRetainerGbp))
+  ) {
+    retainerPence = poundsToMinorUnits(rawRetainerGbp);
+  }
+  const normalizedRetainerGbp =
+    retainerPence !== null ? minorUnitsToPounds(retainerPence) : null;
+  const retainerMoniesOnAccountPence =
+    retainerPence !== null ? minorUnitsToPgBigInt(retainerPence) : null;
+
   const costsJson: Record<string, unknown> = {
     billingBasisId: matter.billingBasisId ?? '',
     feeEstimateGbp: matter.feeEstimateGbp ?? null,
     agreedFeeCapGbp: matter.agreedFeeCapGbp ?? null,
-    retainerMoniesOnAccountGbp: matter.retainerMoniesOnAccountGbp ?? null,
+    retainerMoniesOnAccountGbp: normalizedRetainerGbp,
   };
 
   const milestonesJson: Record<string, unknown> = {
@@ -655,7 +731,7 @@ function buildMatterDbParameters(
     engagementLetterSignedAt: matter.engagementLetterSignedAt ?? null,
     feeEstimateGbp: matter.feeEstimateGbp ?? null,
     agreedFeeCapGbp: matter.agreedFeeCapGbp ?? null,
-    retainerMoniesOnAccountGbp: matter.retainerMoniesOnAccountGbp ?? null,
+    retainerMoniesOnAccountGbp: normalizedRetainerGbp,
     partiesFallback: matter.parties ?? [],
     hasSourceEnquiryId: matter.sourceEnquiryId !== undefined,
     hasSourceQuoteId: matter.sourceQuoteId !== undefined,
@@ -757,6 +833,7 @@ function buildMatterDbParameters(
       ? JSON.stringify(riskAssessmentJson)
       : null,
     costsJson: JSON.stringify(costsJson),
+    retainerMoniesOnAccountPence,
     openingRecordJson: JSON.stringify(openingRecordJson),
     milestonesJson: JSON.stringify(milestonesJson),
     numberSequenceKey: matter.numberSequenceKey ?? null,
@@ -1098,7 +1175,8 @@ export class TenantMatterRepository extends TenantScopedRepository {
            created_at, updated_at, additional_client_ids_json,
            restricted_access_user_ids_json, fields_json, custom_fields_json,
            conflict_check_record_json, risk_assessment_json, costs_json,
-           opening_record_json, milestones_json, number_sequence_key, number_sequence_value
+           opening_record_json, milestones_json, number_sequence_key, number_sequence_value,
+           retainer_monies_on_account_pence
          ) VALUES (
            $1, $2, 1, $3, $4, $5,
            $6, $7, $8,
@@ -1112,7 +1190,8 @@ export class TenantMatterRepository extends TenantScopedRepository {
            $34::timestamptz, $35::timestamptz, $36::jsonb,
            $37::jsonb, $38::jsonb, $39::jsonb,
            $40::jsonb, $41::jsonb, $42::jsonb,
-           $43::jsonb, $44::jsonb, $45, $46::bigint
+           $43::jsonb, $44::jsonb, $45, $46::bigint,
+           $47::bigint
          )
          ON CONFLICT (tenant_id, id) DO UPDATE SET
            row_version = 1,
@@ -1159,7 +1238,8 @@ export class TenantMatterRepository extends TenantScopedRepository {
            opening_record_json = EXCLUDED.opening_record_json,
            milestones_json = EXCLUDED.milestones_json,
            number_sequence_key = COALESCE(EXCLUDED.number_sequence_key, public.matters.number_sequence_key),
-           number_sequence_value = COALESCE(EXCLUDED.number_sequence_value, public.matters.number_sequence_value)
+           number_sequence_value = COALESCE(EXCLUDED.number_sequence_value, public.matters.number_sequence_value),
+           retainer_monies_on_account_pence = EXCLUDED.retainer_monies_on_account_pence
          WHERE public.matters.client_id = 'O-KEYDATE-STUB'
          RETURNING *`,
         [
@@ -1209,6 +1289,7 @@ export class TenantMatterRepository extends TenantScopedRepository {
           p.milestonesJson,
           p.numberSequenceKey,
           p.numberSequenceValue,
+          p.retainerMoniesOnAccountPence,
         ],
       );
 
@@ -1352,7 +1433,8 @@ export class TenantMatterRepository extends TenantScopedRepository {
            opening_record_json = $44::jsonb,
            milestones_json = $45::jsonb,
            number_sequence_key = COALESCE($46, public.matters.number_sequence_key),
-           number_sequence_value = COALESCE($47::bigint, public.matters.number_sequence_value)
+           number_sequence_value = COALESCE($47::bigint, public.matters.number_sequence_value),
+           retainer_monies_on_account_pence = $48::bigint
          WHERE tenant_id = $1
            AND id = $2
            AND row_version = $3
@@ -1405,6 +1487,7 @@ export class TenantMatterRepository extends TenantScopedRepository {
           p.milestonesJson,
           p.numberSequenceKey,
           p.numberSequenceValue,
+          p.retainerMoniesOnAccountPence,
         ],
       );
 
@@ -1502,7 +1585,8 @@ export class TenantMatterRepository extends TenantScopedRepository {
            created_at, updated_at, additional_client_ids_json,
            restricted_access_user_ids_json, fields_json, custom_fields_json,
            conflict_check_record_json, risk_assessment_json, costs_json,
-           opening_record_json, milestones_json, number_sequence_key, number_sequence_value
+           opening_record_json, milestones_json, number_sequence_key, number_sequence_value,
+           retainer_monies_on_account_pence
          ) VALUES (
            $1, $2, 1, $3, $4, $5,
            $6, $7, $8,
@@ -1516,7 +1600,8 @@ export class TenantMatterRepository extends TenantScopedRepository {
            $34::timestamptz, $35::timestamptz, $36::jsonb,
            $37::jsonb, $38::jsonb, $39::jsonb,
            $40::jsonb, $41::jsonb, $42::jsonb,
-           $43::jsonb, $44::jsonb, $45, $46::bigint
+           $43::jsonb, $44::jsonb, $45, $46::bigint,
+           $47::bigint
          )
          ON CONFLICT (tenant_id, id) DO UPDATE SET
            row_version = COALESCE(public.matters.row_version, 0) + 1,
@@ -1563,7 +1648,8 @@ export class TenantMatterRepository extends TenantScopedRepository {
            opening_record_json = EXCLUDED.opening_record_json,
            milestones_json = EXCLUDED.milestones_json,
            number_sequence_key = COALESCE(EXCLUDED.number_sequence_key, public.matters.number_sequence_key),
-           number_sequence_value = COALESCE(EXCLUDED.number_sequence_value, public.matters.number_sequence_value)
+           number_sequence_value = COALESCE(EXCLUDED.number_sequence_value, public.matters.number_sequence_value),
+           retainer_monies_on_account_pence = EXCLUDED.retainer_monies_on_account_pence
          RETURNING *`,
         [
           p.tenantId,
@@ -1612,6 +1698,7 @@ export class TenantMatterRepository extends TenantScopedRepository {
           p.milestonesJson,
           p.numberSequenceKey,
           p.numberSequenceValue,
+          p.retainerMoniesOnAccountPence,
         ],
       );
       const saved = res.rows[0];
@@ -1680,7 +1767,8 @@ export class TenantMatterRepository extends TenantScopedRepository {
              created_at, updated_at, additional_client_ids_json,
              restricted_access_user_ids_json, fields_json, custom_fields_json,
              conflict_check_record_json, risk_assessment_json, costs_json,
-             opening_record_json, milestones_json, number_sequence_key, number_sequence_value
+             opening_record_json, milestones_json, number_sequence_key, number_sequence_value,
+             retainer_monies_on_account_pence
            ) VALUES (
              $1, $2, $3, $4, $5, $6,
              $7, $8, $9,
@@ -1694,7 +1782,8 @@ export class TenantMatterRepository extends TenantScopedRepository {
              $35::timestamptz, $36::timestamptz, $37::jsonb,
              $38::jsonb, $39::jsonb, $40::jsonb,
              $41::jsonb, $42::jsonb, $43::jsonb,
-             $44::jsonb, $45::jsonb, $46, $47::bigint
+             $44::jsonb, $45::jsonb, $46, $47::bigint,
+             $48::bigint
            )
            ON CONFLICT (tenant_id, id) DO UPDATE SET
              row_version = COALESCE(public.matters.row_version, EXCLUDED.row_version, 1),
@@ -1741,7 +1830,8 @@ export class TenantMatterRepository extends TenantScopedRepository {
              opening_record_json = EXCLUDED.opening_record_json,
              milestones_json = EXCLUDED.milestones_json,
              number_sequence_key = COALESCE(EXCLUDED.number_sequence_key, public.matters.number_sequence_key),
-             number_sequence_value = COALESCE(EXCLUDED.number_sequence_value, public.matters.number_sequence_value)
+             number_sequence_value = COALESCE(EXCLUDED.number_sequence_value, public.matters.number_sequence_value),
+             retainer_monies_on_account_pence = EXCLUDED.retainer_monies_on_account_pence
            RETURNING *`,
           [
             p.tenantId,
@@ -1791,6 +1881,7 @@ export class TenantMatterRepository extends TenantScopedRepository {
             p.milestonesJson,
             p.numberSequenceKey,
             p.numberSequenceValue,
+            p.retainerMoniesOnAccountPence,
           ],
         );
 
@@ -1878,6 +1969,7 @@ export class TenantMatterRepository extends TenantScopedRepository {
       hasRestrictedAccessPermission?: boolean;
       hasRestrictedMatterAccess?: boolean;
       canViewCdd?: boolean;
+      activeStatusIds?: readonly string[];
     },
   ): Promise<TMatter | null> {
     const viewerId = options?.viewerUserId ?? options?.viewerId ?? ctx.actorId;
@@ -1887,6 +1979,7 @@ export class TenantMatterRepository extends TenantScopedRepository {
       options?.includeRestricted ??
       false;
     const canViewCdd = options?.canViewCdd !== false;
+    const activeStatusIds = options?.activeStatusIds;
     return this.withTenantReadTransaction(ctx, async (tx) => {
       const res = await tx.query<DbMatterRow>(
         "SELECT * FROM public.matters WHERE tenant_id = $1 AND id = $2 AND client_id <> 'O-KEYDATE-STUB'",
@@ -1901,7 +1994,9 @@ export class TenantMatterRepository extends TenantScopedRepository {
       const partiesMap = await this.loadPartiesByMatterIdsInTx(tx, ctx, [
         row.id,
       ]);
-      const matter = mapMatterRow<TMatter>(row, partiesMap.get(row.id) ?? []);
+      const matter = mapMatterRow<TMatter>(row, partiesMap.get(row.id) ?? [], {
+        activeStatusIds,
+      });
       return this.applyMatterCddVisibility(matter, canViewCdd);
     });
   }
@@ -1924,6 +2019,7 @@ export class TenantMatterRepository extends TenantScopedRepository {
           hasRestrictedAccessPermission?: boolean;
           hasRestrictedMatterAccess?: boolean;
           canViewCdd?: boolean;
+          activeStatusIds?: readonly string[];
           limit?: number;
           offset?: number;
         },
@@ -1931,6 +2027,7 @@ export class TenantMatterRepository extends TenantScopedRepository {
     viewerId: string;
     includeRestricted: boolean;
     canViewCdd: boolean;
+    activeStatusIds: readonly string[] | undefined;
     limit: number | null;
     offset: number | null;
   } {
@@ -1954,6 +2051,10 @@ export class TenantMatterRepository extends TenantScopedRepository {
       viewerOrOptions.canViewCdd === false
         ? false
         : true;
+    const activeStatusIds =
+      typeof viewerOrOptions === 'object' && viewerOrOptions !== null
+        ? viewerOrOptions.activeStatusIds
+        : undefined;
     const limit =
       typeof viewerOrOptions === 'object' &&
       viewerOrOptions !== null &&
@@ -1968,7 +2069,14 @@ export class TenantMatterRepository extends TenantScopedRepository {
       Number.isFinite(viewerOrOptions.offset)
         ? Math.max(0, Math.floor(viewerOrOptions.offset))
         : null;
-    return { viewerId, includeRestricted, canViewCdd, limit, offset };
+    return {
+      viewerId,
+      includeRestricted,
+      canViewCdd,
+      activeStatusIds,
+      limit,
+      offset,
+    };
   }
 
   private buildMatterEntityFilterClauses(
@@ -2074,13 +2182,20 @@ export class TenantMatterRepository extends TenantScopedRepository {
           hasRestrictedAccessPermission?: boolean;
           hasRestrictedMatterAccess?: boolean;
           canViewCdd?: boolean;
+          activeStatusIds?: readonly string[];
           includeMerged?: boolean;
           limit?: number;
           offset?: number;
         } = ctx.actorId,
   ): Promise<TMatter[]> {
-    const { viewerId, includeRestricted, canViewCdd, limit, offset } =
-      this.resolveMatterViewerOptions(ctx, viewerOrOptions);
+    const {
+      viewerId,
+      includeRestricted,
+      canViewCdd,
+      activeStatusIds,
+      limit,
+      offset,
+    } = this.resolveMatterViewerOptions(ctx, viewerOrOptions);
     const includeMerged =
       typeof viewerOrOptions === 'object' && viewerOrOptions !== null
         ? viewerOrOptions.includeMerged
@@ -2130,7 +2245,9 @@ export class TenantMatterRepository extends TenantScopedRepository {
       );
       return visibleRows.map((row) =>
         this.applyMatterCddVisibility(
-          mapMatterRow<TMatter>(row, partiesMap.get(row.id) ?? []),
+          mapMatterRow<TMatter>(row, partiesMap.get(row.id) ?? [], {
+            activeStatusIds,
+          }),
           canViewCdd,
         ),
       );
@@ -2139,6 +2256,7 @@ export class TenantMatterRepository extends TenantScopedRepository {
 
   public async listAllMattersUnfiltered<TMatter extends TenantMatterRecord = TenantMatterRecord>(
     ctx: TenantContext,
+    options?: { activeStatusIds?: readonly string[] },
   ): Promise<TMatter[]> {
     return this.withTenantReadTransaction(ctx, async (tx) => {
       const res = await tx.query<DbMatterRow>(
@@ -2154,7 +2272,9 @@ export class TenantMatterRepository extends TenantScopedRepository {
         res.rows.map((r) => r.id),
       );
       return res.rows.map((row) =>
-        mapMatterRow<TMatter>(row, partiesMap.get(row.id) ?? []),
+        mapMatterRow<TMatter>(row, partiesMap.get(row.id) ?? [], {
+          activeStatusIds: options?.activeStatusIds,
+        }),
       );
     });
   }
@@ -2174,6 +2294,7 @@ export class TenantMatterRepository extends TenantScopedRepository {
       readonly ownerPersonId?: string;
       readonly conflictReferenceEntityId?: string;
     },
+    options?: { readonly activeStatusIds?: readonly string[] },
   ): Promise<TMatter[]> {
     return this.withTenantReadTransaction(ctx, async (tx) => {
       const params: unknown[] = [ctx.tenantId];
@@ -2196,7 +2317,9 @@ export class TenantMatterRepository extends TenantScopedRepository {
         res.rows.map((r) => r.id),
       );
       return res.rows.map((row) =>
-        mapMatterRow<TMatter>(row, partiesMap.get(row.id) ?? []),
+        mapMatterRow<TMatter>(row, partiesMap.get(row.id) ?? [], {
+          activeStatusIds: options?.activeStatusIds,
+        }),
       );
     });
   }
@@ -2230,6 +2353,7 @@ export class TenantMatterRepository extends TenantScopedRepository {
           hasRestrictedAccessPermission?: boolean;
           hasRestrictedMatterAccess?: boolean;
           canViewCdd?: boolean;
+          activeStatusIds?: readonly string[];
           limit?: number;
         } = ctx.actorId,
   ): Promise<TMatter[]> {
@@ -2285,7 +2409,9 @@ export class TenantMatterRepository extends TenantScopedRepository {
       );
       return visibleRows.map((row) =>
         this.applyMatterCddVisibility(
-          mapMatterRow<TMatter>(row, partiesMap.get(row.id) ?? []),
+          mapMatterRow<TMatter>(row, partiesMap.get(row.id) ?? [], {
+            activeStatusIds: resolved.activeStatusIds,
+          }),
           resolved.canViewCdd,
         ),
       );
@@ -2414,6 +2540,7 @@ export class TenantMatterRepository extends TenantScopedRepository {
           hasRestrictedAccessPermission?: boolean;
           hasRestrictedMatterAccess?: boolean;
           canViewCdd?: boolean;
+          activeStatusIds?: readonly string[];
           includeMerged?: boolean;
           excludeIds?: readonly string[];
           limit?: number;
@@ -2427,7 +2554,7 @@ export class TenantMatterRepository extends TenantScopedRepository {
     const excludeIds = Array.from(
       new Set((optsObj?.excludeIds ?? []).map((id) => id?.trim()).filter(Boolean) as string[]),
     );
-    const { viewerId, includeRestricted, canViewCdd, limit } =
+    const { viewerId, includeRestricted, canViewCdd, activeStatusIds, limit } =
       this.resolveMatterViewerOptions(ctx, viewerOrOptions);
     if (!cleanQuery && excludeIds.length === 0 && optsObj?.includeMerged === undefined) {
       return this.listVisibleMatters<TMatter>(ctx, viewerOrOptions);
@@ -2494,7 +2621,9 @@ export class TenantMatterRepository extends TenantScopedRepository {
       );
       return visibleRows.map((row) =>
         this.applyMatterCddVisibility(
-          mapMatterRow<TMatter>(row, partiesMap.get(row.id) ?? []),
+          mapMatterRow<TMatter>(row, partiesMap.get(row.id) ?? [], {
+            activeStatusIds,
+          }),
           canViewCdd,
         ),
       );
@@ -2515,6 +2644,7 @@ export class TenantMatterRepository extends TenantScopedRepository {
       hasRestrictedAccessPermission?: boolean;
       hasRestrictedMatterAccess?: boolean;
       canViewCdd?: boolean;
+      activeStatusIds?: readonly string[];
     },
   ): Promise<TMatter[]> {
     const cleanIds = Array.from(
@@ -2531,6 +2661,7 @@ export class TenantMatterRepository extends TenantScopedRepository {
         viewerOrOptions?.includeRestricted,
     );
     const canViewCdd = viewerOrOptions?.canViewCdd !== false;
+    const activeStatusIds = viewerOrOptions?.activeStatusIds;
     return this.withTenantReadTransaction(ctx, async (tx) => {
       const res = await tx.query<DbMatterRow>(
         `SELECT * FROM public.matters
@@ -2551,7 +2682,9 @@ export class TenantMatterRepository extends TenantScopedRepository {
       );
       return visibleRows.map((row) =>
         this.applyMatterCddVisibility(
-          mapMatterRow<TMatter>(row, partiesMap.get(row.id) ?? []),
+          mapMatterRow<TMatter>(row, partiesMap.get(row.id) ?? [], {
+            activeStatusIds,
+          }),
           canViewCdd,
         ),
       );
@@ -2883,7 +3016,9 @@ export class TenantMatterRepository extends TenantScopedRepository {
       return {
         items: visibleRows.map((row) =>
           this.applyMatterCddVisibility(
-            mapMatterRow<TMatter>(row, partiesMap.get(row.id) ?? []),
+            mapMatterRow<TMatter>(row, partiesMap.get(row.id) ?? [], {
+              activeStatusIds,
+            }),
             canViewCdd,
           ),
         ),
@@ -3383,6 +3518,7 @@ export class TenantMatterRepository extends TenantScopedRepository {
           hasRestrictedAccessPermission?: boolean;
           hasRestrictedMatterAccess?: boolean;
           canViewCdd?: boolean;
+          activeStatusIds?: readonly string[];
         } = ctx.actorId,
   ): Promise<TMatter[]> {
     return this.listVisibleMatters<TMatter>(ctx, viewerOrOptions);
