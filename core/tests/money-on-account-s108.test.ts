@@ -70,6 +70,7 @@ import {
   openProspectiveMatterRecord,
   prepareQuoteConversionRecord,
   recordCddChecklistItemRecord,
+  recordMoneyOnAccountReceiptRecord,
   resetAllDemoData,
   reverseMoneyOnAccountReceiptRecord,
   saveMatterRecord,
@@ -721,10 +722,21 @@ describe('S1-08 (ADR 0043): Money on Account Requests, Chasing, Manual/PMS Recei
     expect(send1.request.requestedAmountPence).toBe(50_000);
     expect(send1.request.paymentReference).toMatch(/^MOA-[A-Z0-9]{1,10}-01$/);
     expect(send1.request.status).toBe('requested');
-    expect(send1.request.bankDetailsSnapshot.sortCode).toBe('00-00-00');
-    expect(send1.request.bankDetailsSnapshot.accountNumber).toBe('00000000');
+    expect(send1.request.bankDetailsSnapshot.sortCode).toBe('**-**-00');
+    expect(send1.request.bankDetailsSnapshot.accountNumber).toBe('******00');
+    const persistedReq1 = await new TenantMoneyOnAccountRepository().getRequestById(
+      ctx,
+      send1.request.id,
+    );
+    expect(persistedReq1?.bankDetailsSnapshot.sortCode).toBe('00-00-00');
+    expect(persistedReq1?.bankDetailsSnapshot.accountNumber).toBe('00000000');
     expect(send1.outboxRecord?.matterId).toBe(convMatterId);
     expect(send1.outboxRecord?.quoteId).toBe(quoteId);
+    expect(send1.outboxRecord?.htmlBody).toBeNull();
+    expect(send1.outboxRecord?.textBody).toBeNull();
+    const send1Json = JSON.stringify(send1);
+    expect(send1Json).not.toContain('00-00-00');
+    expect(send1Json).not.toContain('00000000');
     expect(send1.chase?.entityKind).toBe('money_on_account');
     expect(send1.chase?.entityId).toBe(send1.request.id);
     expect(send1.chase?.status).toBe('active');
@@ -1016,6 +1028,14 @@ describe('S1-08 (ADR 0043): Money on Account Requests, Chasing, Manual/PMS Recei
       { roles: ['admin'], mfaVerified: true },
     );
     expect(mfaSave.ok).toBe(true);
+    if (!mfaSave.ok) throw new Error(String(mfaSave.error));
+    expect('config' in mfaSave).toBe(false);
+    expect(mfaSave.summary.maskedSortCode).toBe('**-**-56');
+    expect(mfaSave.summary.maskedAccountNumber).toBe('******21');
+    const mfaSaveJson = JSON.stringify(mfaSave);
+    expect(mfaSaveJson).not.toContain('12-34-56');
+    expect(mfaSaveJson).not.toContain('87654321');
+    expect(mfaSaveJson).not.toContain('GB29NWBK60161331926819');
 
     const configAudits = await auditEntriesForRecord('money_on_account_config', 'FIRM-MOA-CONFIG');
     expect(configAudits.length).toBeGreaterThanOrEqual(1);
@@ -1031,7 +1051,7 @@ describe('S1-08 (ADR 0043): Money on Account Requests, Chasing, Manual/PMS Recei
     expect(latestAudit.oldValue).not.toContain('00-00-00');
     expect(latestAudit.oldValue).not.toContain('00000000');
 
-    // R867: saveMoneyOnAccountConfigAction validates merged config against MoneyOnAccountConfigSchema
+    // R867 & R881: saveMoneyOnAccountConfigAction validates merged config with plain labels (never raw field paths)
     const badEnabledSave = await runAsActionActor(
       'P-000004',
       () =>
@@ -1043,7 +1063,7 @@ describe('S1-08 (ADR 0043): Money on Account Requests, Chasing, Manual/PMS Recei
     );
     expect(badEnabledSave).toMatchObject({ ok: false, code: 'MOA_CONFIG_VALIDATION_ERROR' });
     if (!badEnabledSave.ok && !isActionDenied(badEnabledSave)) {
-      expect(badEnabledSave.message.toLowerCase()).toContain('enabled');
+      expect(badEnabledSave.message).toContain('Money on Account enabled');
     }
 
     const longWordingSave = await runAsActionActor(
@@ -1061,7 +1081,61 @@ describe('S1-08 (ADR 0043): Money on Account Requests, Chasing, Manual/PMS Recei
     );
     expect(longWordingSave).toMatchObject({ ok: false, code: 'MOA_CONFIG_VALIDATION_ERROR' });
     if (!longWordingSave.ok && !isActionDenied(longWordingSave)) {
-      expect(longWordingSave.message).toContain('requestWordings.introductoryParagraph');
+      expect(longWordingSave.message).toContain('Introductory paragraph');
+      expect(longWordingSave.message).not.toContain('requestWordings.introductoryParagraph');
+    }
+
+    const badSortCodeSave = await runAsActionActor(
+      'P-000004',
+      () =>
+        saveMoneyOnAccountConfigAction(
+          {
+            clientAccount: {
+              sortCode: '12-34-56-0000000000',
+            } as unknown as MoneyOnAccountConfiguration['clientAccount'],
+          },
+          'Excessive sort code length test',
+        ),
+      { roles: ['admin'], mfaVerified: true },
+    );
+    expect(badSortCodeSave).toMatchObject({ ok: false, code: 'MOA_CONFIG_VALIDATION_ERROR' });
+    if (!badSortCodeSave.ok && !isActionDenied(badSortCodeSave)) {
+      expect(badSortCodeSave.message).toContain('Sort code');
+      expect(badSortCodeSave.message).not.toContain('clientAccount.sortCode');
+    }
+
+    const badAccountNumberSave = await runAsActionActor(
+      'P-000004',
+      () =>
+        saveMoneyOnAccountConfigAction(
+          {
+            clientAccount: {
+              accountNumber: '1'.repeat(33),
+            } as unknown as MoneyOnAccountConfiguration['clientAccount'],
+          },
+          'Excessive account number length test',
+        ),
+      { roles: ['admin'], mfaVerified: true },
+    );
+    expect(badAccountNumberSave).toMatchObject({ ok: false, code: 'MOA_CONFIG_VALIDATION_ERROR' });
+    if (!badAccountNumberSave.ok && !isActionDenied(badAccountNumberSave)) {
+      expect(badAccountNumberSave.message).toContain('Account number');
+      expect(badAccountNumberSave.message).not.toContain('clientAccount.accountNumber');
+    }
+
+    const badPrefixSave = await runAsActionActor(
+      'P-000004',
+      () =>
+        saveMoneyOnAccountConfigAction(
+          { paymentReferencePrefix: 'a' },
+          'Invalid prefix length test',
+        ),
+      { roles: ['admin'], mfaVerified: true },
+    );
+    expect(badPrefixSave).toMatchObject({ ok: false, code: 'MOA_CONFIG_VALIDATION_ERROR' });
+    if (!badPrefixSave.ok && !isActionDenied(badPrefixSave)) {
+      expect(badPrefixSave.message).toContain('Payment reference prefix');
+      expect(badPrefixSave.message).not.toContain('moneyOnAccount.paymentReferencePrefix');
     }
 
     // Create matter and send request -> verify Day 7, Day 14, Day 21 execution
@@ -1338,6 +1412,150 @@ describe('S1-08 (ADR 0043): Money on Account Requests, Chasing, Manual/PMS Recei
         (a) => a.field === 'Communication chase stopped' && a.oldValue === 'active',
       ),
     ).toBe(true);
+
+    // R878: Every Money on Account action response masks bank details in serialised JSON
+    // (1: saveConfig verified on mfaSave; 2: createAndSend + pre-TX replay; 3: recordReceipt + replay;
+    //  4: reverseReceipt; 5: matchPms; 6: cancelRequest)
+    const assertNoRawR878BankDetails = (payload: unknown) => {
+      const serialised = JSON.stringify(payload);
+      expect(serialised).not.toContain('12-34-56');
+      expect(serialised).not.toContain('87654321');
+      expect(serialised).not.toContain('GB29NWBK60161331926819');
+    };
+    assertNoRawR878BankDetails(sent1);
+    expect(sent1.request.bankDetailsSnapshot.sortCode).toBe('**-**-56');
+    expect(sent1.request.bankDetailsSnapshot.accountNumber).toBe('******21');
+    expect(sent1.outboxRecord?.htmlBody).toBeNull();
+    expect(sent1.outboxRecord?.textBody).toBeNull();
+
+    const sent1Replay = await runAsActionActor(
+      'P-000002',
+      () =>
+        createAndSendMoneyOnAccountRequestAction({
+          matterId: matter.id,
+          requestedAmountPence: 40_000,
+          recipientEmail: 'chase-client@example.test',
+          idempotencyKey: 'chase-req-1',
+        }),
+      { roles: ['fee_earner'], mfaVerified: false },
+    );
+    expect(sent1Replay.ok).toBe(true);
+    if (sent1Replay.ok) {
+      expect(sent1Replay.deduplicated).toBe(true);
+      expect(sent1Replay.request.bankDetailsSnapshot.sortCode).toBe('**-**-56');
+      expect(sent1Replay.outboxRecord?.htmlBody).toBeNull();
+      expect(sent1Replay.outboxRecord?.textBody).toBeNull();
+    }
+    assertNoRawR878BankDetails(sent1Replay);
+
+    const r878Manual = await runAsActionActor(
+      'P-000009',
+      () =>
+        recordMoneyOnAccountReceiptAction({
+          requestId: sent2.request.id,
+          amountPence: 10_000,
+          receivedDate: '2026-11-27',
+          bankReference: 'R878-MAN-1',
+          idempotencyKey: 'r878-manual-1',
+        }),
+      { roles: ['finance'], mfaVerified: false },
+    );
+    expect(r878Manual.ok).toBe(true);
+    if (r878Manual.ok) {
+      expect(r878Manual.request.bankDetailsSnapshot.sortCode).toBe('**-**-56');
+      expect(r878Manual.request.bankDetailsSnapshot.accountNumber).toBe('******21');
+    }
+    assertNoRawR878BankDetails(r878Manual);
+
+    const r878ManualReplay = await runAsActionActor(
+      'P-000009',
+      () =>
+        recordMoneyOnAccountReceiptAction({
+          requestId: sent2.request.id,
+          amountPence: 10_000,
+          receivedDate: '2026-11-27',
+          bankReference: 'R878-MAN-1',
+          idempotencyKey: 'r878-manual-1',
+        }),
+      { roles: ['finance'], mfaVerified: false },
+    );
+    expect(r878ManualReplay.ok).toBe(true);
+    if (r878ManualReplay.ok) {
+      expect(r878ManualReplay.deduplicated).toBe(true);
+      expect(r878ManualReplay.request.bankDetailsSnapshot.sortCode).toBe('**-**-56');
+    }
+    assertNoRawR878BankDetails(r878ManualReplay);
+
+    if (r878Manual.ok) {
+      const r878Reverse = await runAsActionActor(
+        'P-000009',
+        () =>
+          reverseMoneyOnAccountReceiptAction({
+            receiptId: r878Manual.receipt.id,
+            reason: 'R878 serialised reversal check',
+          }),
+        { roles: ['finance'], mfaVerified: false },
+      );
+      expect(r878Reverse.ok).toBe(true);
+      if (r878Reverse.ok) {
+        expect(r878Reverse.request.bankDetailsSnapshot.sortCode).toBe('**-**-56');
+      }
+      assertNoRawR878BankDetails(r878Reverse);
+    }
+
+    const r878PmsRepo = new TenantPmsRepository();
+    await r878PmsRepo.importExtractDataset(
+      ctx,
+      buildMinimalPmsDataset('MAT-S108-R878', [
+        {
+          transaction_id: 'TX-R878-MATCH',
+          date: '2026-11-27',
+          type: 'Receipt',
+          description: 'R878 client receipt',
+          amount: 100,
+          amount_pence: 10_000,
+        },
+      ]),
+    );
+    await r878PmsRepo.putPmsLink(ctx, {
+      id: 'PMSL-MOA-R878',
+      entityType: 'matter',
+      onesquaredId: matter.id,
+      pmsCode: 'MAT-S108-R878',
+      matchedBy: 'manual',
+      matchedAt: '2026-11-27T08:00:00.000Z',
+    });
+    const r878PmsMatch = await runAsActionActor(
+      'P-000009',
+      () =>
+        matchPmsClientLedgerReceiptAction({
+          requestId: sent3.request.id,
+          pmsTransactionId: 'TX-R878-MATCH',
+        }),
+      { roles: ['finance'], mfaVerified: false },
+    );
+    expect(r878PmsMatch.ok).toBe(true);
+    if (r878PmsMatch.ok) {
+      expect(r878PmsMatch.request.bankDetailsSnapshot.sortCode).toBe('**-**-56');
+      expect(r878PmsMatch.request.bankDetailsSnapshot.accountNumber).toBe('******21');
+    }
+    assertNoRawR878BankDetails(r878PmsMatch);
+
+    const r878Cancel = await runAsActionActor(
+      'P-000002',
+      () =>
+        cancelMoneyOnAccountRequestAction({
+          requestId: sent2.request.id,
+          reason: 'R878 serialised cancel check',
+        }),
+      { roles: ['fee_earner'], mfaVerified: false },
+    );
+    expect(r878Cancel.ok).toBe(true);
+    if (r878Cancel.ok) {
+      expect(r878Cancel.request.bankDetailsSnapshot.sortCode).toBe('**-**-56');
+      expect(r878Cancel.request.bankDetailsSnapshot.accountNumber).toBe('******21');
+    }
+    assertNoRawR878BankDetails(r878Cancel);
   }, 45_000);
 
   it('4. Strict receipt RBAC (Q4), Lesson 7 moa_receipt evidence upload/download & stored-purpose validation, and uniform NOT_FOUND', async () => {
@@ -1812,6 +2030,214 @@ describe('S1-08 (ADR 0043): Money on Account Requests, Chasing, Manual/PMS Recei
     });
     expect(await matterRepo.getMatterById<Matter>(adminCtx, matter.id)).not.toBeNull();
     expect(await moaRepo.listReceiptsForMatter(finCtx, matter.id)).toHaveLength(3);
+
+    // R880 (a): Concurrent same-key receipt recording (Promise.all, real PG, runAsTestActor):
+    // exactly one receipt is persisted, both calls return it, winning proof survives (row + blob),
+    // and losing duplicate proof is cleaned up (row + blob) only AFTER transactional reference check.
+    const evRepoR880 = new TenantEvidenceArtifactRepository();
+    const storageR880 = getDocumentStorage(validatedCfg);
+    const uploadConcProof = async (fileName: string, bodyMarker: string) => {
+      const up = await runAsActionActor(
+        'P-000009',
+        () =>
+          uploadEvidenceArtifactRecord(
+            {
+              subjectType: 'matter',
+              subjectId: matter.id,
+              purpose: 'moa_receipt',
+              fileName,
+              contentType: 'application/pdf',
+              bytes: Buffer.from(`%PDF-1.4\n% ${bodyMarker}\n%%EOF\n`),
+            },
+            'P-000009',
+          ),
+        { roles: ['finance'], mfaVerified: false },
+      );
+      if (!up.ok) throw new Error(up.message);
+      return up.artifact;
+    };
+
+    const concProofA = await uploadConcProof('conc-proof-a.pdf', 'Conc Proof A');
+    const concProofB = await uploadConcProof('conc-proof-b.pdf', 'Conc Proof B');
+    const concKey = 'rcpt-conc-same-key';
+    const [concResA, concResB] = await Promise.all([
+      runAsTestActor(
+        'P-000009',
+        () =>
+          recordMoneyOnAccountReceiptRecord(
+            {
+              requestId: reqIdempId,
+              amountPence: 5_000,
+              receivedDate: '2026-11-27',
+              bankReference: 'CONC-SAME-1',
+              evidenceArtifactId: concProofA.id,
+              idempotencyKey: concKey,
+            },
+            'P-000009',
+            {
+              tenantCtx: testTenantCtx('P-000009', {
+                roles: ['finance'],
+                mfaVerified: false,
+              }),
+            },
+          ),
+        { roles: ['finance'], mfaVerified: false },
+      ),
+      runAsTestActor(
+        'P-000009',
+        () =>
+          recordMoneyOnAccountReceiptRecord(
+            {
+              requestId: reqIdempId,
+              amountPence: 5_000,
+              receivedDate: '2026-11-27',
+              bankReference: 'CONC-SAME-1',
+              evidenceArtifactId: concProofB.id,
+              idempotencyKey: concKey,
+            },
+            'P-000009',
+            {
+              tenantCtx: testTenantCtx('P-000009', {
+                roles: ['finance'],
+                mfaVerified: false,
+              }),
+            },
+          ),
+        { roles: ['finance'], mfaVerified: false },
+      ),
+    ]);
+    expect(concResA.ok).toBe(true);
+    expect(concResB.ok).toBe(true);
+    if (!concResA.ok || !concResB.ok) throw new Error('Expected both concurrent calls to succeed');
+    expect(concResA.receipt.id).toBe(concResB.receipt.id);
+    expect([concResA.deduplicated, concResB.deduplicated].sort()).toEqual([false, true]);
+    expect(concResA.request.bankDetailsSnapshot.sortCode).toBe('**-**-00');
+    expect(concResB.request.bankDetailsSnapshot.sortCode).toBe('**-**-00');
+
+    const receiptsForConcKey = (await moaRepo.listReceiptsForMatter(finCtx, matter.id)).filter(
+      (r) => r.idempotencyKey === concKey,
+    );
+    expect(receiptsForConcKey).toHaveLength(1);
+
+    const winningArtifact =
+      concResA.receipt.evidenceArtifactId === concProofA.id ? concProofA : concProofB;
+    const losingArtifact =
+      winningArtifact.id === concProofA.id ? concProofB : concProofA;
+    expect(await evRepoR880.getArtifactById(finCtx, winningArtifact.id)).not.toBeNull();
+    const winningBytes = await storageR880.getObjectBytes(finCtx, {
+      blobKey: winningArtifact.blobKey,
+    });
+    expect(winningBytes.byteLength).toBeGreaterThan(0);
+    expect(await evRepoR880.getArtifactById(finCtx, losingArtifact.id)).toBeNull();
+    await expect(
+      storageR880.getObjectBytes(finCtx, { blobKey: losingArtifact.blobKey }),
+    ).rejects.toThrow();
+
+    // R880 (b): Cleanup on duplicate or failed validation MUST NOT delete a proof file referenced by
+    // an existing receipt (isEvidenceArtifactReferencedInReceiptsInTx + FOR UPDATE row lock).
+    const replaySameProof = await runAsActionActor(
+      'P-000009',
+      () =>
+        recordMoneyOnAccountReceiptAction({
+          requestId: reqIdempId,
+          amountPence: 5_000,
+          receivedDate: '2026-11-27',
+          bankReference: 'CONC-SAME-1',
+          evidenceArtifactId: winningArtifact.id,
+          idempotencyKey: concKey,
+        }),
+      { roles: ['finance'], mfaVerified: false },
+    );
+    expect(replaySameProof.ok).toBe(true);
+    if (replaySameProof.ok) {
+      expect(replaySameProof.deduplicated).toBe(true);
+      expect(replaySameProof.receipt.id).toBe(concResA.receipt.id);
+    }
+    const failedWithReferencedProof = await runAsActionActor(
+      'P-000009',
+      () =>
+        recordMoneyOnAccountReceiptAction({
+          requestId: reqIdempId,
+          amountPence: 5_000,
+          receivedDate: '2026-02-31',
+          evidenceArtifactId: winningArtifact.id,
+          idempotencyKey: 'rcpt-fail-must-keep-ref-proof',
+        }),
+      { roles: ['finance'], mfaVerified: false },
+    );
+    expect(failedWithReferencedProof).toMatchObject({ ok: false, code: 'VALIDATION_ERROR' });
+    expect(await evRepoR880.getArtifactById(finCtx, winningArtifact.id)).not.toBeNull();
+    expect(
+      (await storageR880.getObjectBytes(finCtx, { blobKey: winningArtifact.blobKey })).byteLength,
+    ).toBeGreaterThan(0);
+
+    // R880 (c): Real PostgreSQL SQLSTATE 23505 (uq_moa_receipts_idempotency_key -> MOA_RECEIPT_IDEMPOTENCY_CONFLICT)
+    // recovery returns existing receipt, cleans up unused duplicate proof, and preserves winning proof.
+    const pg23505WinningProof = await uploadConcProof(
+      'pg23505-win-proof.pdf',
+      'PG 23505 Winning Proof',
+    );
+    const pg23505DupProof = await uploadConcProof(
+      'pg23505-dup-proof.pdf',
+      'PG 23505 Duplicate Proof',
+    );
+    const pg23505Key = 'rcpt-pg23505-key';
+    const first23505Res = await runAsActionActor(
+      'P-000009',
+      () =>
+        recordMoneyOnAccountReceiptAction({
+          requestId: reqIdempId,
+          amountPence: 5_000,
+          receivedDate: '2026-11-27',
+          bankReference: 'PG23505-1',
+          evidenceArtifactId: pg23505WinningProof.id,
+          idempotencyKey: pg23505Key,
+        }),
+      { roles: ['finance'], mfaVerified: false },
+    );
+    expect(first23505Res.ok).toBe(true);
+    if (!first23505Res.ok) throw new Error('Expected initial 23505 fixture receipt to commit');
+
+    const findPreSpy = vi
+      .spyOn(TenantMoneyOnAccountRepository.prototype, 'findReceiptByIdempotencyKey')
+      .mockResolvedValueOnce(null);
+    const findInTxSpy = vi
+      .spyOn(TenantMoneyOnAccountRepository.prototype, 'findReceiptByIdempotencyKeyInTx')
+      .mockResolvedValueOnce(null);
+    let second23505Res: Awaited<ReturnType<typeof recordMoneyOnAccountReceiptAction>>;
+    try {
+      second23505Res = await runAsActionActor(
+        'P-000009',
+        () =>
+          recordMoneyOnAccountReceiptAction({
+            requestId: reqIdempId,
+            amountPence: 5_000,
+            receivedDate: '2026-11-27',
+            bankReference: 'PG23505-1',
+            evidenceArtifactId: pg23505DupProof.id,
+            idempotencyKey: pg23505Key,
+          }),
+        { roles: ['finance'], mfaVerified: false },
+      );
+    } finally {
+      findPreSpy.mockRestore();
+      findInTxSpy.mockRestore();
+    }
+    expect(second23505Res.ok).toBe(true);
+    if (second23505Res.ok) {
+      expect(second23505Res.deduplicated).toBe(true);
+      expect(second23505Res.receipt.id).toBe(first23505Res.receipt.id);
+      expect(second23505Res.request.bankDetailsSnapshot.sortCode).toBe('**-**-00');
+    }
+    expect(await evRepoR880.getArtifactById(finCtx, pg23505WinningProof.id)).not.toBeNull();
+    expect(
+      (await storageR880.getObjectBytes(finCtx, { blobKey: pg23505WinningProof.blobKey }))
+        .byteLength,
+    ).toBeGreaterThan(0);
+    expect(await evRepoR880.getArtifactById(finCtx, pg23505DupProof.id)).toBeNull();
+    await expect(
+      storageR880.getObjectBytes(finCtx, { blobKey: pg23505DupProof.blobKey }),
+    ).rejects.toThrow();
   }, 60_000);
 
   it('5. PMS client ledger matching rejects negative outflows, enforces uq_moa_receipts_tenant_pms_tx on Promise.all race, stops chase on received, and allows rematch after reversal', async () => {
@@ -2324,9 +2750,10 @@ describe('S1-08 (ADR 0043): Money on Account Requests, Chasing, Manual/PMS Recei
             }
           } else {
             expect(openRes.ok).toBe(false);
-            if (!openRes.ok && !isActionDenied(openRes)) {
-              expect(openRes.code).toBe('MATTER_OPENING_GATE_BLOCKED');
-            }
+            expect(isActionDenied(openRes)).toBe(false);
+            expect((openRes as { code?: string }).code).toBe(
+              'MATTER_OPENING_GATE_BLOCKED',
+            );
           }
         } else if (pathKind === 'save_matter') {
           const latestBeforeSave = await matterRepo.getMatterById<Matter>(ctxFee, created.id);

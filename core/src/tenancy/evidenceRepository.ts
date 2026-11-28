@@ -196,12 +196,14 @@ export class TenantEvidenceArtifactRepository extends TenantScopedRepository {
     tx: TenantSqlClient,
     ctx: TenantContext,
     artifactId: string,
+    options?: { readonly forUpdate?: boolean },
   ): Promise<EvidenceArtifactRecord | null> {
+    const lockSql = options?.forUpdate ? ' FOR UPDATE' : '';
     const res = await tx.query<DbEvidenceArtifactRow>(
       `SELECT *
        FROM public.evidence_artifacts
        WHERE tenant_id = $1 AND id = $2
-       LIMIT 1`,
+       LIMIT 1${lockSql}`,
       [ctx.tenantId, artifactId],
     );
     const row = res.rows[0];
@@ -292,20 +294,30 @@ export class TenantEvidenceArtifactRepository extends TenantScopedRepository {
     });
   }
 
+  public async deleteArtifactByIdInTx(
+    tx: TenantSqlClient,
+    ctx: TenantContext,
+    artifactId: string,
+  ): Promise<boolean> {
+    const cleanId = artifactId.trim();
+    if (!cleanId) return false;
+    const res = await tx.query(
+      `DELETE FROM public.evidence_artifacts
+       WHERE tenant_id = $1 AND id = $2`,
+      [ctx.tenantId, cleanId],
+    );
+    return (res.rowCount ?? 0) > 0;
+  }
+
   public async deleteArtifactById(
     ctx: TenantContext,
     artifactId: string,
   ): Promise<boolean> {
     const cleanId = artifactId.trim();
     if (!cleanId) return false;
-    return this.withTenantTransaction(ctx, async (tx) => {
-      const res = await tx.query(
-        `DELETE FROM public.evidence_artifacts
-         WHERE tenant_id = $1 AND id = $2`,
-        [ctx.tenantId, cleanId],
-      );
-      return (res.rowCount ?? 0) > 0;
-    });
+    return this.withTenantTransaction(ctx, async (tx) =>
+      this.deleteArtifactByIdInTx(tx, ctx, cleanId),
+    );
   }
 
   public async clearTenantData(ctx: TenantContext): Promise<void> {

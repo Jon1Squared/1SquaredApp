@@ -250,15 +250,18 @@ import {
 import {
   areClientBankDetailsConfigured,
   assertBankDetailsSafeForEnvironment,
+  buildMoneyOnAccountDisplaySummary,
   buildMoneyOnAccountPaymentReference,
   evaluateMatterFundsOnAccountGate,
   formatMaskedMoaConfigAuditSummary,
   isValidCalendarYmd,
+  maskMoneyOnAccountRequestForDisplay,
   renderMoneyOnAccountRequestContent,
   renderMoneyOnAccountRequestPdfBytes,
   resolveEffectiveMoneyOnAccountConfig,
   resolveMatterAgreedPaymentOnAccountPence,
   type MatterFundsOnAccountGateEvaluation,
+  type MoneyOnAccountDisplaySummary,
 } from '@/domain/moneyOnAccount';
 import {
   computeServerWorkTypeRetentionState,
@@ -43688,6 +43691,53 @@ export async function resolveEffectiveMoneyOnAccountConfigRecord(
   return resolveEffectiveMoneyOnAccountConfig(tenantConfig, override ?? null);
 }
 
+function stripOutboxBodiesForActionResponse(
+  record: EmailOutboxRecord | null,
+): EmailOutboxRecord | null {
+  if (!record) return null;
+  // R878: Outbox text/HTML bodies may contain raw bank details intended for the client email;
+  // strip them before returning over interactive server actions.
+  return {
+    ...record,
+    htmlBody: null,
+    textBody: null,
+  };
+}
+
+const MOA_CONFIG_FIELD_LABELS: Readonly<Record<string, string>> = {
+  enabled: 'Money on Account enabled',
+  paymentReferencePrefix: 'Payment reference prefix',
+  requestEmailSubjectTemplate: 'Request email subject template',
+  clientAccount: 'Client bank account details',
+  'clientAccount.accountName': 'Account name',
+  'clientAccount.bankName': 'Bank name',
+  'clientAccount.sortCode': 'Sort code',
+  'clientAccount.accountNumber': 'Account number',
+  'clientAccount.iban': 'IBAN',
+  'clientAccount.bic': 'BIC / SWIFT',
+  'clientAccount.allowDemoPlaceholderDetails': 'Demo placeholder details setting',
+  requestWordings: 'Request wordings',
+  'requestWordings.introductoryParagraph': 'Introductory paragraph',
+  'requestWordings.bankTransferInstruction': 'Bank transfer instructions',
+  'requestWordings.clientMoneyComplianceNote': 'Client money compliance note',
+};
+
+function formatMoaConfigValidationIssue(
+  path: readonly PropertyKey[],
+  message: string,
+): string {
+  const dotPath = path.map((seg) => String(seg)).join('.');
+  const label = MOA_CONFIG_FIELD_LABELS[dotPath];
+  const cleanedMessage = message.replace(
+    /^moneyOnAccount\.paymentReferencePrefix\s+must\s+be\s+/i,
+    'must be ',
+  );
+  if (label) {
+    return `${label}: ${cleanedMessage}`;
+  }
+  return cleanedMessage;
+}
+
 export async function saveMoneyOnAccountConfigRecord(
   newConfigInput: Partial<MoneyOnAccountConfiguration>,
   reason: string,
@@ -43698,7 +43748,7 @@ export async function saveMoneyOnAccountConfigRecord(
     readonly tenantConfig?: TenantConfiguration;
   },
 ): Promise<
-  { ok: true; config: MoneyOnAccountConfiguration } | RegisterServiceDenialOrError
+  { ok: true; summary: MoneyOnAccountDisplaySummary } | RegisterServiceDenialOrError
 > {
   try {
     const { ctx, tenantCfg, actor, permSet } =
@@ -43742,7 +43792,7 @@ export async function saveMoneyOnAccountConfigRecord(
     ) {
       return registerServiceFailure(
         'MOA_CONFIG_VALIDATION_ERROR',
-        'clientAccount: Client account settings must be an object.',
+        'Client bank account details: Client account settings must be an object.',
       );
     }
     if (
@@ -43753,7 +43803,7 @@ export async function saveMoneyOnAccountConfigRecord(
     ) {
       return registerServiceFailure(
         'MOA_CONFIG_VALIDATION_ERROR',
-        'requestWordings: Request wording settings must be an object.',
+        'Request wordings: Request wording settings must be an object.',
       );
     }
 
@@ -43792,10 +43842,7 @@ export async function saveMoneyOnAccountConfigRecord(
     const schemaCheck = MoneyOnAccountConfigSchema.safeParse(mergedCandidate);
     if (!schemaCheck.success) {
       const msg = schemaCheck.error.issues
-        .map((issue) => {
-          const path = issue.path.length > 0 ? `${issue.path.join('.')}: ` : '';
-          return `${path}${issue.message}`;
-        })
+        .map((issue) => formatMoaConfigValidationIssue(issue.path, issue.message))
         .join(' ');
       return registerServiceFailure('MOA_CONFIG_VALIDATION_ERROR', msg);
     }
@@ -43874,7 +43921,7 @@ export async function saveMoneyOnAccountConfigRecord(
       return stored;
     });
 
-    return { ok: true, config: saved };
+    return { ok: true, summary: buildMoneyOnAccountDisplaySummary(saved) };
   } catch (err) {
     return mapRegisterErrorToDenial(err);
   }
@@ -43983,9 +44030,9 @@ export async function createAndSendMoneyOnAccountRequestRecord(
         ]);
         return {
           ok: true,
-          request: existingPre,
+          request: maskMoneyOnAccountRequestForDisplay(existingPre),
           matter: matterPre,
-          outboxRecord: existingOutbox,
+          outboxRecord: stripOutboxBodiesForActionResponse(existingOutbox),
           chase: existingChase,
           emailProviderDisabled,
           deduplicated: true,
@@ -44518,9 +44565,9 @@ export async function createAndSendMoneyOnAccountRequestRecord(
 
     return {
       ok: true,
-      request: finalOutcome.request,
+      request: maskMoneyOnAccountRequestForDisplay(finalOutcome.request),
       matter: finalOutcome.matter,
-      outboxRecord: finalOutbox,
+      outboxRecord: stripOutboxBodiesForActionResponse(finalOutbox),
       chase: finalOutcome.chase,
       emailProviderDisabled,
       deduplicated: finalOutcome.deduplicated,
@@ -44707,7 +44754,11 @@ export async function cancelMoneyOnAccountRequestRecord(
       }
       await auditRepo.appendAuditEntriesInTx(tx, ctx, auditEntries);
 
-      return { ok: true as const, request: updated, stoppedChase };
+      return {
+        ok: true as const,
+        request: maskMoneyOnAccountRequestForDisplay(updated),
+        stoppedChase,
+      };
     });
   } catch (err) {
     return mapRegisterErrorToDenial(err);
@@ -44723,33 +44774,32 @@ async function cleanupOrphanMoaProofBestEffort(params: {
 }): Promise<void> {
   const { storage, evidenceRepo, moaRepo, ctx, artifact } = params;
   if (!artifact) return;
-  const stillReferenced = await moaRepo
-    .isEvidenceArtifactReferencedInReceipts(ctx, artifact.id)
-    .catch(() => true);
-  if (stillReferenced) return;
 
+  // R880: Hold FOR UPDATE on evidence_artifacts, re-check references, and delete the DB row inside
+  // one transaction BEFORE removing the stored blob post-commit.
+  let deletedBlobKey: string | null = null;
   try {
-    await storage.deleteObject(ctx, { blobKey: artifact.blobKey });
-  } catch (err) {
-    const errorCode =
-      err instanceof Error
-        ? (err as { code?: unknown }).code
-          ? String((err as { code?: unknown }).code)
-          : err.name
-        : 'ORPHAN_BLOB_DELETE_FAILED';
-    console.warn(
-      JSON.stringify({
-        event: 'moa.orphan_proof_blob_delete_failed',
-        tenantId: ctx.tenantId,
-        correlationId: ctx.correlationId,
-        artifactId: artifact.id,
-        errorCode: errorCode.replace(/[^A-Za-z0-9_.:-]/g, '_').slice(0, 64),
-      }),
-    );
-  }
-
-  try {
-    await evidenceRepo.deleteArtifactById(ctx, artifact.id);
+    deletedBlobKey = await evidenceRepo.withTenantTransaction(ctx, async (tx) => {
+      const locked = await evidenceRepo.getArtifactByIdInTx(
+        tx,
+        ctx,
+        artifact.id,
+        { forUpdate: true },
+      );
+      if (!locked) return null;
+      const stillReferenced = await moaRepo.isEvidenceArtifactReferencedInReceiptsInTx(
+        tx,
+        ctx,
+        locked.id,
+      );
+      if (stillReferenced) return null;
+      const deleted = await evidenceRepo.deleteArtifactByIdInTx(
+        tx,
+        ctx,
+        locked.id,
+      );
+      return deleted ? locked.blobKey : null;
+    });
   } catch (err) {
     const errorCode =
       err instanceof Error
@@ -44760,6 +44810,29 @@ async function cleanupOrphanMoaProofBestEffort(params: {
     console.warn(
       JSON.stringify({
         event: 'moa.orphan_proof_row_delete_failed',
+        tenantId: ctx.tenantId,
+        correlationId: ctx.correlationId,
+        artifactId: artifact.id,
+        errorCode: errorCode.replace(/[^A-Za-z0-9_.:-]/g, '_').slice(0, 64),
+      }),
+    );
+    return;
+  }
+
+  if (!deletedBlobKey) return;
+
+  try {
+    await storage.deleteObject(ctx, { blobKey: deletedBlobKey });
+  } catch (err) {
+    const errorCode =
+      err instanceof Error
+        ? (err as { code?: unknown }).code
+          ? String((err as { code?: unknown }).code)
+          : err.name
+        : 'ORPHAN_BLOB_DELETE_FAILED';
+    console.warn(
+      JSON.stringify({
+        event: 'moa.orphan_proof_blob_delete_failed',
         tenantId: ctx.tenantId,
         correlationId: ctx.correlationId,
         artifactId: artifact.id,
@@ -44864,7 +44937,6 @@ export async function recordMoneyOnAccountReceiptRecord(
     }
 
     const cleanArtifactId = input.evidenceArtifactId?.trim() || null;
-    let verifiedEvidenceRefs: IntakeEvidenceArtifactRef[] = [];
     if (cleanArtifactId) {
       const artifact = await evidenceRepo.getArtifactById(ctx, cleanArtifactId);
       // Lesson 5 & Lesson 7 / R868: Missing, cross-matter, unscanned, or wrong-purpose
@@ -44884,18 +44956,6 @@ export async function recordMoneyOnAccountReceiptRecord(
       if (artifact.uploadedByPersonId === actor.id) {
         ownedMoaArtifact = artifact;
       }
-      verifiedEvidenceRefs = [
-        {
-          blobKey: artifact.blobKey,
-          sha256: artifact.sha256,
-          contentType: artifact.contentType,
-          sizeBytes: artifact.byteSize,
-          scanStatus: artifact.scanStatus,
-          fileName: artifact.fileName,
-          uploadedByActorId: artifact.uploadedByPersonId,
-          uploadedAt: artifact.uploadedAt,
-        },
-      ];
     }
 
     const cleanIdempotencyKey = input.idempotencyKey?.trim() || '';
@@ -44912,7 +44972,7 @@ export async function recordMoneyOnAccountReceiptRecord(
         return {
           ok: true,
           receipt: existingPre,
-          request: latestRequest,
+          request: maskMoneyOnAccountRequestForDisplay(latestRequest),
           stoppedChase: null,
           deduplicated: true,
         };
@@ -45004,6 +45064,42 @@ export async function recordMoneyOnAccountReceiptRecord(
           );
         }
 
+        // R880: Lock and re-verify the proof artifact inside the same transaction so concurrent
+        // orphan cleanup cannot delete the row or blob underneath a committing receipt.
+        let lockedEvidenceRefs: IntakeEvidenceArtifactRef[] = [];
+        if (cleanArtifactId) {
+          const lockedArtifact = await evidenceRepo.getArtifactByIdInTx(
+            tx,
+            ctx,
+            cleanArtifactId,
+            { forUpdate: true },
+          );
+          if (
+            !lockedArtifact ||
+            lockedArtifact.subjectType !== 'matter' ||
+            lockedArtifact.subjectId !== matterPre.id ||
+            lockedArtifact.scanStatus !== 'clean' ||
+            lockedArtifact.purpose !== 'moa_receipt'
+          ) {
+            return registerServiceFailure(
+              'NOT_FOUND',
+              'Evidence file not found or access denied.',
+            );
+          }
+          lockedEvidenceRefs = [
+            {
+              blobKey: lockedArtifact.blobKey,
+              sha256: lockedArtifact.sha256,
+              contentType: lockedArtifact.contentType,
+              sizeBytes: lockedArtifact.byteSize,
+              scanStatus: lockedArtifact.scanStatus,
+              fileName: lockedArtifact.fileName,
+              uploadedByActorId: lockedArtifact.uploadedByPersonId,
+              uploadedAt: lockedArtifact.uploadedAt,
+            },
+          ];
+        }
+
         const nowIso = new Date().toISOString();
         const receiptId = await moaRepo.allocateReceiptIdInTx(tx);
 
@@ -45017,7 +45113,7 @@ export async function recordMoneyOnAccountReceiptRecord(
           bankStatementReference: cleanBankRef,
           notes: cleanNotes,
           outcome: 'receipt_recorded_manual',
-          evidenceRefs: verifiedEvidenceRefs,
+          evidenceRefs: lockedEvidenceRefs,
         });
 
         const insertedReceipt = await moaRepo.insertReceiptInTx(tx, ctx, {
@@ -45108,10 +45204,15 @@ export async function recordMoneyOnAccountReceiptRecord(
 
       if (!txResult.ok) {
         await cleanupOwnedOrphanIfUnused();
-      } else if (txResult.deduplicated) {
+        return txResult;
+      }
+      if (txResult.deduplicated) {
         await cleanupOwnedOrphanIfUnused(txResult.receipt.evidenceArtifactId);
       }
-      return txResult;
+      return {
+        ...txResult,
+        request: maskMoneyOnAccountRequestForDisplay(txResult.request),
+      };
     } catch (txErr) {
       const errCode = (txErr as { code?: string })?.code;
       if (errCode === 'MOA_RECEIPT_IDEMPOTENCY_CONFLICT' && cleanIdempotencyKey) {
@@ -45127,7 +45228,7 @@ export async function recordMoneyOnAccountReceiptRecord(
           return {
             ok: true,
             receipt: existingAfterConflict,
-            request: latestRequest,
+            request: maskMoneyOnAccountRequestForDisplay(latestRequest),
             stoppedChase: null,
             deduplicated: true,
           };
@@ -45390,7 +45491,7 @@ export async function matchPmsClientLedgerReceiptRecord(
       return {
         ok: true as const,
         receipt: insertedReceipt,
-        request: updatedRequest,
+        request: maskMoneyOnAccountRequestForDisplay(updatedRequest),
         stoppedChase,
       };
     });
@@ -45560,7 +45661,7 @@ export async function reverseMoneyOnAccountReceiptRecord(
       return {
         ok: true as const,
         receipt: reversedReceipt,
-        request: updatedRequest,
+        request: maskMoneyOnAccountRequestForDisplay(updatedRequest),
       };
     });
   } catch (err) {

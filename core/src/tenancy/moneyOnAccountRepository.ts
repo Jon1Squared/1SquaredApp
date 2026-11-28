@@ -289,23 +289,33 @@ export class TenantMoneyOnAccountRepository extends TenantScopedRepository {
     );
   }
 
+  public async isEvidenceArtifactReferencedInReceiptsInTx(
+    tx: TenantSqlClient,
+    ctx: TenantContext,
+    artifactId: string,
+  ): Promise<boolean> {
+    const cleanId = artifactId.trim();
+    if (!cleanId) return false;
+    const res = await tx.query<{ exists_flag: number }>(
+      `SELECT 1 AS exists_flag
+         FROM public.money_on_account_receipts
+        WHERE tenant_id = $1
+          AND evidence_artifact_id = $2
+        LIMIT 1`,
+      [ctx.tenantId, cleanId],
+    );
+    return res.rows.length > 0;
+  }
+
   public async isEvidenceArtifactReferencedInReceipts(
     ctx: TenantContext,
     artifactId: string,
   ): Promise<boolean> {
     const cleanId = artifactId.trim();
     if (!cleanId) return false;
-    return this.withTenantReadTransaction(ctx, async (tx) => {
-      const res = await tx.query<{ exists_flag: number }>(
-        `SELECT 1 AS exists_flag
-           FROM public.money_on_account_receipts
-          WHERE tenant_id = $1
-            AND evidence_artifact_id = $2
-          LIMIT 1`,
-        [ctx.tenantId, cleanId],
-      );
-      return res.rows.length > 0;
-    });
+    return this.withTenantReadTransaction(ctx, async (tx) =>
+      this.isEvidenceArtifactReferencedInReceiptsInTx(tx, ctx, cleanId),
+    );
   }
 
   public async getRequestByIdInTx(
